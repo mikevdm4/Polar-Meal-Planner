@@ -1,0 +1,38 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+
+  .pe-app { font-family: 'Inter', sans-serif; background: #F5F4EE; color: #26312F; min-height: 100vh; }
+  .pe-display { font-family: 'Fraunces', serif; }
+  .pe-mono { font-family: 'IBM Plex Mono', monospace; }
+
+  .pe-header { background: #14403E; color: #F5F4EE; position: relative; overflow: hidden; }
+  .pe-contour { position: absolute; inset: 0; opacity: 0.14; pointer-events: none; }
+
+  .pe-tab { transition: all 0.15s ease; }
+  .pe-tab.active { background: #F5F4EE; color: #14403E; }
+  .pe-tab:not(.active) { color: #CFE0DC; }
+
+  .pe-card { background: #FFFFFF; border: 1px solid #E4E1D6; border-radius: 14px; }
+  .pe-badge-veggie { background: #E4EEDD; color: #4F6B41; }
+  .pe-badge-time { background: #F0ECE0; color: #6B6355; }
+  .pe-btn-primary { background: #B5652F; color: #FFF9F2; transition: background 0.15s ease; }
+  .pe-btn-primary:hover { background: #9C5527; }
+  .pe-btn-primary:disabled { background: #D8CFC0; color: #948A78; cursor: not-allowed; }
+  .pe-btn-secondary { background: #14403E; color: #F5F4EE; transition: background 0.15s ease; }
+  .pe-btn-secondary:hover { background: #0E302E; }
+  .pe-input { border: 1.5px solid #DAD5C7; border-radius: 10px; background: #FFFFFF; }
+  .pe-input:focus { outline: none; border-color: #14403E; box-shadow: 0 0 0 3px rgba(20,64,62,0.12); }
+  .pe-chip { border-radius: 999px; transition: all 0.15s ease; }
+  .pe-chip.active { background: #14403E; color: #F5F4EE; }
+  .pe-chip:not(.active) { background: #FFFFFF; color: #26312F; border: 1px solid #DAD5C7; }
+  .pe-divider { border-top: 1px dashed #DAD5C7; }
+  .pe-fadein { animation: peFadeIn 0.2s ease; }
+  @keyframes peFadeIn { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: translateY(0);} }
+  .pe-scroll::-webkit-scrollbar { height: 6px; width: 6px; }
+  .pe-scroll::-webkit-scrollbar-thumb { background: #CFC7B4; border-radius: 3px; }
+
