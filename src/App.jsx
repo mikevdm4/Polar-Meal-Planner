@@ -1,14 +1,47 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
 import { getSyncCode, setSyncCode, generateSyncCode, pullFromCloud, pushToCloud, schedulePush } from "./cloudSync.js";
+import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
 const STRUCTURES = ["Breakfast, Lunch & Dinner", "Lunch & Dinner", "Meals Only"];
 const SECTION_ORDER = [
   "Breakfast", "Smoothies", "Granola", "Lunch", "Dinner",
-  "Snacks", "Pre-Gym & Pre-Run", "Recovery Meals", "Recovery Smoothies",
+  "Snacks", "Desserts & Sweet Treats", "Pre-Gym & Pre-Run", "Recovery Meals", "Recovery Smoothies",
 ];
+
+// Precomputed once: every distinct protein/carb/veg ingredient across the whole
+// plan, grouped for the "what can I make with X" dropdown filter.
+const INGREDIENT_GROUPS = (() => {
+  const proteins = new Set();
+  const carbs = new Set();
+  const vegs = new Set();
+  Object.values(RECIPE_DATA.sections).forEach((sectionData) => {
+    sectionData.items.forEach((item) => {
+      if (sectionData.type === "fixed") {
+        if (item.food1) {
+          const cat = item.category1;
+          (cat === "Proteins" ? proteins : cat === "Vegetables" ? vegs : carbs).add(item.food1);
+        }
+        if (item.food2) {
+          const cat = item.category2;
+          (cat === "Proteins" ? proteins : cat === "Vegetables" ? vegs : carbs).add(item.food2);
+        }
+      } else {
+        if (item.proteinFood) proteins.add(item.proteinFood);
+        if (item.carbFood) carbs.add(item.carbFood);
+        if (item.vegFood) vegs.add(item.vegFood);
+      }
+    });
+  });
+  return {
+    Protein: [...proteins].sort(),
+    "Carb / Starch": [...carbs].sort(),
+    Vegetable: [...vegs].sort(),
+  };
+})();
+
 const SECTION_MEAL_TYPE = {
   Breakfast: "Breakfast", Lunch: "Lunch", Dinner: "Dinner", "Recovery Meals": "Recovery",
 };
@@ -437,6 +470,105 @@ function TargetsSummary({ profile }) {
   );
 }
 
+const WORKOUT_LOG_SECTIONS = new Set(["Recovery Meals", "Recovery Smoothies", "Pre-Gym & Pre-Run"]);
+
+function dateStr(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function splitDayCalories(entries) {
+  let daily = 0;
+  let workout = 0;
+  (entries || []).forEach((entry) => {
+    const m = entryMacros(entry);
+    const isWorkout = entry.type === "recipe" && WORKOUT_LOG_SECTIONS.has(entry.section);
+    if (isWorkout) workout += m.calories;
+    else daily += m.calories;
+  });
+  return { daily, workout };
+}
+
+function TrendsChart({ logsByDate, targets }) {
+  const [range, setRange] = useState("week"); // week | month
+  const days = range === "week" ? 7 : 30;
+
+  const data = useMemo(() => {
+    const today = new Date();
+    const out = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const key = dateStr(d);
+      const { daily, workout } = splitDayCalories(logsByDate[key]);
+      out.push({ date: d, daily, workout, total: daily + workout });
+    }
+    return out;
+  }, [logsByDate, days]);
+
+  const baseline = targets.calories;
+  const maxVal = Math.max(baseline * 1.3, ...data.map((d) => d.total), 1);
+
+  const chartWidth = 320;
+  const chartHeight = 140;
+  const barGap = 2;
+  const barWidth = Math.max(1.5, chartWidth / days - barGap);
+  const scaleY = (val) => (val / maxVal) * chartHeight;
+  const baselineY = chartHeight - scaleY(baseline);
+
+  return (
+    <div className="pe-card p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Trends</div>
+        <div className="flex gap-1.5">
+          {["week", "month"].map((r) => (
+            <button
+              key={r}
+              className={`pe-chip px-3 py-1 text-xs font-medium ${range === r ? "active" : ""}`}
+              onClick={() => setRange(r)}
+            >
+              {r === "week" ? "Week" : "Month"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <svg viewBox={`0 0 ${chartWidth} ${chartHeight + 10}`} className="w-full" style={{ maxHeight: 160 }}>
+        <line
+          x1="0" y1={baselineY} x2={chartWidth} y2={baselineY}
+          stroke="#B5652F" strokeWidth="1" strokeDasharray="4,3"
+        />
+        {data.map((d, i) => {
+          const x = i * (barWidth + barGap);
+          const dailyH = scaleY(d.daily);
+          const workoutH = scaleY(d.workout);
+          return (
+            <g key={i}>
+              <rect x={x} y={chartHeight - dailyH} width={barWidth} height={dailyH} fill="#14403E" rx="1" />
+              <rect x={x} y={chartHeight - dailyH - workoutH} width={barWidth} height={workoutH} fill="#B5652F" rx="1" />
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="flex items-center gap-4 mt-2 text-[11px]" style={{ color: "#6B6355" }}>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: "#14403E" }} /> Daily meals
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: "#B5652F" }} /> Workout nutrition
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 border-t border-dashed" style={{ borderColor: "#B5652F" }} /> Target ({round(baseline)} kcal)
+        </span>
+      </div>
+      <p className="text-[11px] mt-2" style={{ color: "#948A78" }}>
+        The target line is your main daily-eating baseline — pre-gym snacks and recovery meals/smoothies stack
+        on top of it separately, since training days are expected to need more.
+      </p>
+    </div>
+  );
+}
+
 function ProgressBar({ label, consumed, target, unit }) {
   const pct = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
   const over = consumed > target;
@@ -473,6 +605,14 @@ function entryMacros(entry) {
       fat: entry.food.fat * factor,
     };
   }
+  if (entry.type === "manual") {
+    return {
+      calories: entry.calories || 0,
+      protein: entry.protein || 0,
+      carbs: entry.carbs || 0,
+      fat: entry.fat || 0,
+    };
+  }
   const servings = entry.servings || 1;
   return {
     calories: entry.baseCalories * servings,
@@ -488,6 +628,9 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
   const [query, setQuery] = useState("");
   const [pendingItem, setPendingItem] = useState(null);
   const [servings, setServings] = useState(1);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [customProteinFood, setCustomProteinFood] = useState(null);
+  const [customProteinGrams, setCustomProteinGrams] = useState(0);
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
   const sectionData = RECIPE_DATA.sections[section];
@@ -510,28 +653,73 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
   const baseProtein = baseMacros ? (isFixed ? baseMacros.protein : baseMacros.proteinG) : 0;
   const baseCarbs = baseMacros ? (isFixed ? baseMacros.carbs : baseMacros.carbG) : 0;
 
+  // Protein-swap adjustment: subtract the recipe's original protein-source
+  // contribution and add whatever the client actually used instead.
+  const proteinOptions = useMemo(
+    () => FOOD_LIST.filter((f) => f.category === "Proteins").sort((a, b) => a.name.localeCompare(b.name)),
+    []
+  );
+
+  const openCustomize = () => {
+    if (!pendingItem) return;
+    setCustomProteinFood(pendingItem.proteinFood);
+    setCustomProteinGrams(Math.round(baseMacros.proteinPortion));
+    setCustomizeOpen(true);
+  };
+
+  const finalMacros = useMemo(() => {
+    if (!pendingItem || !baseMacros) return null;
+    if (isFixed || !customizeOpen || !customProteinFood) {
+      return { calories: baseMacros.calories, protein: baseProtein, carbs: baseCarbs, fat: baseMacros.fat };
+    }
+    const originalProteinCal = (baseMacros.proteinPortion * pendingItem.proteinKcalPer100) / 100;
+    const originalProteinFat = (baseMacros.proteinPortion * (pendingItem.proteinFatPer100 || 0)) / 100;
+    const swapFood = FOOD_LIST.find((f) => f.name === customProteinFood);
+    if (!swapFood) return { calories: baseMacros.calories, protein: baseProtein, carbs: baseCarbs, fat: baseMacros.fat };
+    const grams = Number(customProteinGrams) || 0;
+    const newProteinCal = (grams * swapFood.kcal) / 100;
+    const newProteinFat = (grams * swapFood.fat) / 100;
+    const newProteinG = (grams * swapFood.protein) / 100;
+    return {
+      calories: baseMacros.calories - originalProteinCal + newProteinCal,
+      protein: newProteinG,
+      carbs: baseCarbs,
+      fat: baseMacros.fat - originalProteinFat + newProteinFat,
+    };
+  }, [pendingItem, baseMacros, isFixed, customizeOpen, customProteinFood, customProteinGrams, baseProtein, baseCarbs]);
+
   const SERVING_OPTIONS = [0.5, 1, 1.5, 2];
 
   const adjustServings = (delta) => {
     setServings((s) => Math.max(0.25, Math.round((s + delta) * 4) / 4));
   };
 
+  const resetPending = () => {
+    setPendingItem(null);
+    setQuery("");
+    setServings(1);
+    setCustomizeOpen(false);
+    setCustomProteinFood(null);
+  };
+
   const add = () => {
-    if (!pendingItem || !baseMacros) return;
+    if (!pendingItem || !finalMacros) return;
     onAdd({
       id: Date.now(),
       type: "recipe",
       name: pendingItem.name,
       section,
       servings,
-      baseCalories: baseMacros.calories,
-      baseProtein,
-      baseCarbs,
-      baseFat: baseMacros.fat,
+      baseCalories: finalMacros.calories,
+      baseProtein: finalMacros.protein,
+      baseCarbs: finalMacros.carbs,
+      baseFat: finalMacros.fat,
+      proteinOverride:
+        customizeOpen && customProteinFood && customProteinFood !== pendingItem.proteinFood
+          ? { food: customProteinFood, grams: Number(customProteinGrams) }
+          : undefined,
     });
-    setPendingItem(null);
-    setQuery("");
-    setServings(1);
+    resetPending();
   };
 
   return (
@@ -542,7 +730,7 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
           <button
             key={s}
             className={`pe-chip whitespace-nowrap px-3 py-1.5 text-xs font-medium ${section === s ? "active" : ""}`}
-            onClick={() => { setSection(s); setPendingItem(null); setQuery(""); setServings(1); }}
+            onClick={() => { setSection(s); resetPending(); }}
           >
             {s}
           </button>
@@ -574,7 +762,7 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
         <p className="text-xs mb-2" style={{ color: "#948A78" }}>No matches in {section}.</p>
       )}
 
-      {pendingItem && baseMacros && (
+      {pendingItem && baseMacros && finalMacros && (
         <div className="pe-fadein rounded-lg p-3 mb-2" style={{ background: "#F5F4EE" }}>
           <div className="flex items-center justify-between mb-2">
             <div className="text-sm font-medium">{pendingItem.name}</div>
@@ -608,12 +796,53 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
             </div>
           </div>
 
+          {!isFixed && (
+            <>
+              {!customizeOpen ? (
+                <button className="text-xs font-medium mb-3" style={{ color: "#14403E" }} onClick={openCustomize}>
+                  Didn't use {pendingItem.proteinFood.toLowerCase()}? Swap the protein →
+                </button>
+              ) : (
+                <div className="pe-fadein rounded-lg p-2.5 mb-3" style={{ background: "#FFFFFF", border: "1px solid #E4E1D6" }}>
+                  <div className="text-xs font-medium mb-1.5" style={{ color: "#40473F" }}>
+                    Actual protein used (replaces {pendingItem.proteinFood})
+                  </div>
+                  <select
+                    className="pe-input w-full px-2 py-2 text-sm mb-2"
+                    value={customProteinFood || ""}
+                    onChange={(e) => setCustomProteinFood(e.target.value)}
+                  >
+                    {proteinOptions.map((f) => (
+                      <option key={f.name} value={f.name}>{f.name}</option>
+                    ))}
+                  </select>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      className="pe-input flex-1 px-2 py-2 text-sm"
+                      value={customProteinGrams}
+                      onChange={(e) => setCustomProteinGrams(e.target.value)}
+                    />
+                    <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+                    <button
+                      className="text-xs font-medium"
+                      style={{ color: "#B5652F" }}
+                      onClick={() => setCustomizeOpen(false)}
+                    >
+                      Undo
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
           <div className="pe-mono text-xs mb-3" style={{ color: "#6B6355" }}>
-            {round(baseMacros.calories * servings)} kcal · P{round(baseProtein * servings)} · C{round(baseCarbs * servings)} · F{round(baseMacros.fat * servings)}
+            {round(finalMacros.calories * servings)} kcal · P{round(finalMacros.protein * servings)} · C{round(finalMacros.carbs * servings)} · F{round(finalMacros.fat * servings)}
             <span style={{ color: "#948A78" }}> (at {servings}× serving)</span>
           </div>
           <div className="flex gap-2">
-            <button className="pe-btn-secondary flex-1 py-2 rounded-full text-xs font-semibold" onClick={() => { setPendingItem(null); setServings(1); }}>
+            <button className="pe-btn-secondary flex-1 py-2 rounded-full text-xs font-semibold" onClick={resetPending}>
               Cancel
             </button>
             <button className="pe-btn-primary flex-1 py-2 rounded-full text-xs font-semibold" onClick={add}>
@@ -674,6 +903,12 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [query, setQuery] = useState("");
   const [pendingFood, setPendingFood] = useState(null);
   const [pendingGrams, setPendingGrams] = useState(100);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualCal, setManualCal] = useState("");
+  const [manualProtein, setManualProtein] = useState("");
+  const [manualCarbs, setManualCarbs] = useState("");
+  const [manualFat, setManualFat] = useState("");
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
   const dayLog = logsByDate[selectedDate] || [];
@@ -715,6 +950,24 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const setEntryServings = (id, servings) =>
     updateDayLog(selectedDate, dayLog.map((e) => (e.id === id ? { ...e, servings: Math.max(0.25, servings) } : e)));
 
+  const addManualEntry = () => {
+    if (!manualName || !manualCal) return;
+    updateDayLog(selectedDate, [
+      ...dayLog,
+      {
+        id: Date.now(),
+        type: "manual",
+        name: manualName,
+        calories: Number(manualCal) || 0,
+        protein: Number(manualProtein) || 0,
+        carbs: Number(manualCarbs) || 0,
+        fat: Number(manualFat) || 0,
+      },
+    ]);
+    setManualName(""); setManualCal(""); setManualProtein(""); setManualCarbs(""); setManualFat("");
+    setManualOpen(false);
+  };
+
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
       <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Daily log</h2>
@@ -749,6 +1002,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
           ))}
         </div>
       )}
+
+      <TrendsChart logsByDate={logsByDate} targets={targets} />
 
       <div className="pe-card p-4 mb-4">
         <ProgressBar label="Calories" consumed={totals.calories} target={targets.calories} unit="" />
@@ -805,6 +1060,58 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         )}
       </div>
 
+      <div className="pe-card p-4 mb-4">
+        <button
+          className="flex items-center justify-between w-full"
+          onClick={() => setManualOpen((o) => !o)}
+        >
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>
+            Log manually (takeaway, meal replacement, etc.)
+          </div>
+          <span className="text-xs" style={{ color: "#948A78" }}>{manualOpen ? "Hide ▲" : "Show ▼"}</span>
+        </button>
+        {manualOpen && (
+          <div className="pe-fadein mt-3">
+            <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+              For anything not in the food database — a takeaway, a shop-bought meal replacement, whatever a
+              nutrition-label lookup (e.g. MyFitnessPal) gives you. Enter the numbers for the whole meal as eaten.
+            </p>
+            <input
+              className="pe-input w-full px-3 py-2 text-sm mb-2"
+              placeholder="What was it? (e.g. Chicken tikka takeaway)"
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
+            />
+            <div className="grid grid-cols-4 gap-2 mb-3">
+              <div>
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Kcal</label>
+                <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualCal} onChange={(e) => setManualCal(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Protein</label>
+                <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualProtein} onChange={(e) => setManualProtein(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Carbs</label>
+                <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualCarbs} onChange={(e) => setManualCarbs(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Fat</label>
+                <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
+              </div>
+            </div>
+            <button
+              className="pe-btn-primary w-full py-2.5 rounded-full text-xs font-semibold"
+              onClick={addManualEntry}
+              disabled={!manualName || !manualCal}
+              style={!manualName || !manualCal ? { opacity: 0.5 } : {}}
+            >
+              Add to log
+            </button>
+          </div>
+        )}
+      </div>
+
       {dayLog.length > 0 && (
         <>
           <div className="flex items-center justify-between mb-2 px-1">
@@ -834,14 +1141,22 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                         >
                           {entry.name}
                         </button>
+                      ) : entry.type === "manual" ? (
+                        <div className="text-sm font-medium truncate">{entry.name}</div>
                       ) : (
                         <div className="text-sm font-medium truncate">{entry.food.name}</div>
                       )}
                     </div>
                     <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
                       {entry.type === "food" && `${entry.grams}g · `}
+                      {entry.type === "manual" && "manual entry · "}
                       {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
                     </div>
+                    {entry.proteinOverride && (
+                      <div className="text-[11px] italic mt-0.5" style={{ color: "#B5652F" }}>
+                        Swapped: {entry.proteinOverride.grams}g {entry.proteinOverride.food}
+                      </div>
+                    )}
                     {entry.type === "recipe" && (
                       <div className="flex items-center gap-1.5 mt-1.5">
                         <button
@@ -884,7 +1199,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 }
 
 
-function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, expanded, onToggleExpand, sectionBadge }) {
+function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, onBulkAdd, expanded, onToggleExpand, sectionBadge }) {
   return (
     <div className="pe-card p-4 mb-3">
       <div className="flex items-start justify-between gap-3">
@@ -934,6 +1249,19 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, e
             )}
             <li className="text-[12px]" style={{ color: "#948A78" }}>Plus: oil, salt, spices (see Store Cupboard)</li>
           </ul>
+          {dietarySwaps(item, isFixed).length > 0 && (
+            <>
+              <div className="font-semibold text-xs uppercase tracking-wide mb-1.5" style={{ color: "#14403E" }}>Dietary swaps</div>
+              <ul className="list-disc list-inside mb-3 space-y-0.5 text-[13px]">
+                {dietarySwaps(item, isFixed).map((s, i) => (
+                  <li key={i}>{s.type}: use {s.to} instead of {s.from}</li>
+                ))}
+              </ul>
+              <p className="text-[11px] mb-3" style={{ color: "#948A78" }}>
+                Best-effort suggestion based on this recipe's main ingredients — always check the full method for a diagnosed allergy or coeliac disease.
+              </p>
+            </>
+          )}
           {(item.method || item.prep) && (
             <>
               <div className="font-semibold text-xs uppercase tracking-wide mb-1.5" style={{ color: "#14403E" }}>Method</div>
@@ -960,9 +1288,20 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, e
             <button className="pe-btn-primary w-7 h-7 rounded-full text-sm font-bold" onClick={onAdd}>+</button>
           </div>
         ) : (
-          <button className="pe-btn-primary text-xs font-semibold px-3.5 py-1.5 rounded-full" onClick={onAdd}>
-            Add to order
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button className="pe-btn-primary text-xs font-semibold px-3.5 py-1.5 rounded-full" onClick={onAdd}>
+              Add to order
+            </button>
+            {onBulkAdd && (
+              <button
+                className="pe-btn-secondary text-xs font-semibold px-2.5 py-1.5 rounded-full"
+                title="Add 4 — handy for batch-cooking a few days at once"
+                onClick={onBulkAdd}
+              >
+                ×4
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -976,6 +1315,9 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
   const [section, setSection] = useState(jumpTarget ? jumpTarget.section : "Breakfast");
   const [search, setSearch] = useState(jumpTarget ? jumpTarget.name : "");
   const [veggieOnly, setVeggieOnly] = useState(false);
+  const [glutenFreeOnly, setGlutenFreeOnly] = useState(false);
+  const [dairyFreeOnly, setDairyFreeOnly] = useState(false);
+  const [timeFilter, setTimeFilter] = useState("any"); // any | quick | standard | batch
   const [expandedKey, setExpandedKey] = useState(jumpTarget ? `${jumpTarget.section}::${jumpTarget.name}` : null);
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
@@ -1010,6 +1352,21 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
     return false;
   };
 
+  const timeInMinutes = (timeStr) => {
+    if (!timeStr) return null;
+    const match = timeStr.match(/(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  };
+  const matchesTimeFilter = (item, isFixed) => {
+    if (timeFilter === "any" || isFixed) return true; // fixed items (snacks etc.) have no comparable cook time
+    const mins = timeInMinutes(item.time);
+    if (mins === null) return true;
+    if (timeFilter === "quick") return mins <= 15;
+    if (timeFilter === "standard") return mins > 15 && mins <= 25;
+    if (timeFilter === "batch") return mins > 25;
+    return true;
+  };
+
   const items = useMemo(() => {
     const sourceSections = isAll ? SECTION_ORDER : [section];
     const list = [];
@@ -1029,8 +1386,11 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
     });
     return list
       .filter((x) => !veggieOnly || x.veggie)
+      .filter((x) => !glutenFreeOnly || isGlutenFree(x.item, x.isFixed))
+      .filter((x) => !dairyFreeOnly || isDairyFree(x.item, x.isFixed))
+      .filter((x) => matchesTimeFilter(x.item, x.isFixed))
       .filter((x) => itemMatchesSearch(x, search));
-  }, [isAll, section, targets, veggieOnly, search]);
+  }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, search, timeFilter]);
 
   return (
     <div className="pe-fadein">
@@ -1047,7 +1407,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
             </button>
           ))}
         </div>
-        <div className="flex gap-2 px-4 pb-3">
+        <div className="flex gap-2 px-4 pb-3 overflow-x-auto pe-scroll">
           <input
             className="pe-input flex-1 px-3 py-2 text-sm"
             placeholder="Search by recipe, protein, carb or veg (e.g. chicken)..."
@@ -1060,6 +1420,55 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
           >
             Veggie only
           </button>
+          <button
+            className={`pe-chip px-3 py-2 text-xs font-semibold ${glutenFreeOnly ? "active" : ""}`}
+            onClick={() => setGlutenFreeOnly((v) => !v)}
+          >
+            Gluten-free
+          </button>
+          <button
+            className={`pe-chip px-3 py-2 text-xs font-semibold ${dairyFreeOnly ? "active" : ""}`}
+            onClick={() => setDairyFreeOnly((v) => !v)}
+          >
+            Dairy-free
+          </button>
+        </div>
+        <div className="flex gap-2 px-4 pb-3 overflow-x-auto pe-scroll">
+          {[
+            ["any", "Any time"],
+            ["quick", "Quick (≤15 min)"],
+            ["standard", "Standard (16-25 min)"],
+            ["batch", "Batch / slow (25 min+)"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              className={`pe-chip whitespace-nowrap px-3 py-1.5 text-xs font-medium ${timeFilter === key ? "active" : ""}`}
+              onClick={() => setTimeFilter(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="px-4 pb-3">
+          <select
+            className="pe-input w-full px-3 py-2 text-sm"
+            value=""
+            onChange={(e) => {
+              if (!e.target.value) return;
+              setSearch(e.target.value);
+              setSection(ALL_KEY);
+              setExpandedKey(null);
+            }}
+          >
+            <option value="">Tired and don't know what to cook? Pick an ingredient…</option>
+            {Object.entries(INGREDIENT_GROUPS).map(([groupLabel, names]) => (
+              <optgroup key={groupLabel} label={groupLabel}>
+                {names.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -1093,6 +1502,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
               onToggleExpand={() => setExpandedKey(expandedKey === key ? null : key)}
               onAdd={() => updateCart(key, itemSection, item, itemIsFixed, 1)}
               onRemove={() => updateCart(key, itemSection, item, itemIsFixed, -1)}
+              onBulkAdd={!itemIsFixed ? () => updateCart(key, itemSection, item, itemIsFixed, 4) : undefined}
             />
           );
         })}
