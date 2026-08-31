@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
-import { getSyncCode, setSyncCode, generateSyncCode, pullFromCloud, pushToCloud, schedulePush } from "./cloudSync.js";
+import { schedulePushUserData } from "./authSync.js";
 import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
+import { supabase } from "./supabaseClient.js";
+import { getMyProfile } from "./auth.js";
+import { pullUserData } from "./authSync.js";
+import { AuthScreen, CoachDashboard } from "./Auth.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
@@ -142,6 +146,11 @@ function round(n) {
 // ---------- storage helpers ----------
 // Persisted storage — real localStorage for a standalone deployment
 // (the Claude-artifact `window.storage` API isn't available outside claude.ai).
+let currentSyncUserId = null;
+export function setSyncUserId(id) {
+  currentSyncUserId = id;
+}
+
 async function loadStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key);
@@ -153,8 +162,7 @@ async function saveStored(key, value) {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {}
-  const code = getSyncCode();
-  if (code) schedulePush(code);
+  if (currentSyncUserId) schedulePushUserData(currentSyncUserId);
 }
 
 function ContourSVG() {
@@ -167,7 +175,7 @@ function ContourSVG() {
   );
 }
 
-function SetupScreen({ profile, setProfile, syncCode, syncStatus, onStartSync, onJoinSync, onStopSync }) {
+function SetupScreen({ profile, setProfile, userEmail, onSignOut }) {
   return (
     <div className="pe-fadein max-w-md mx-auto px-5 py-6">
       <h2 className="pe-display text-2xl font-semibold mb-1" style={{ color: "#14403E" }}>Your details</h2>
@@ -224,89 +232,18 @@ function SetupScreen({ profile, setProfile, syncCode, syncStatus, onStartSync, o
 
       <MealDistribution profile={profile} setProfile={setProfile} />
 
-      <SyncSettings
-        syncCode={syncCode}
-        syncStatus={syncStatus}
-        onStartSync={onStartSync}
-        onJoinSync={onJoinSync}
-        onStopSync={onStopSync}
-      />
+      <div className="pe-card p-4 mb-5">
+        <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>Account</div>
+        <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+          Signed in as <strong>{userEmail}</strong>. Your data syncs automatically to any device you log into
+          with this account.
+        </p>
+        <button className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold" onClick={onSignOut}>
+          Sign out
+        </button>
+      </div>
 
       <TargetsSummary profile={profile} />
-    </div>
-  );
-}
-
-function SyncSettings({ syncCode, syncStatus, onStartSync, onJoinSync, onStopSync }) {
-  const [joinValue, setJoinValue] = useState("");
-  const [showJoin, setShowJoin] = useState(false);
-
-  return (
-    <div className="pe-card p-4 mb-5">
-      <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>
-        Sync across devices
-      </div>
-      <p className="text-xs mb-3" style={{ color: "#948A78" }}>
-        By default your data only lives on this device. Set up a sync code once, then enter the same code on
-        your phone or laptop to see the same profile, order and logs everywhere.
-      </p>
-
-      {syncCode ? (
-        <div>
-          <div className="flex items-center justify-between rounded-lg px-3 py-2.5 mb-2" style={{ background: "#F5F4EE" }}>
-            <div>
-              <div className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: "#948A78" }}>Your sync code</div>
-              <div className="pe-mono text-lg font-bold tracking-widest" style={{ color: "#14403E" }}>{syncCode}</div>
-            </div>
-            <span
-              className="text-[11px] font-semibold px-2 py-1 rounded-full"
-              style={{
-                background: syncStatus === "error" ? "#F5DCC9" : "#E4EEDD",
-                color: syncStatus === "error" ? "#9C5527" : "#4F6B41",
-              }}
-            >
-              {syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? "Sync error" : "Synced"}
-            </span>
-          </div>
-          <p className="text-[11px] mb-3" style={{ color: "#948A78" }}>
-            Enter this exact code on your other device (Setup → Sync across devices → I have a code) to link it.
-          </p>
-          <button className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold" onClick={onStopSync}>
-            Stop syncing this device
-          </button>
-        </div>
-      ) : (
-        <div>
-          <div className="flex gap-2 mb-3">
-            <button className="pe-btn-primary flex-1 py-2.5 rounded-full text-xs font-semibold" onClick={onStartSync}>
-              Set up sync (new code)
-            </button>
-            <button
-              className="pe-btn-secondary flex-1 py-2.5 rounded-full text-xs font-semibold"
-              onClick={() => setShowJoin((v) => !v)}
-            >
-              I have a code
-            </button>
-          </div>
-          {showJoin && (
-            <div className="pe-fadein flex gap-2">
-              <input
-                className="pe-input flex-1 px-3 py-2 text-sm pe-mono tracking-widest"
-                placeholder="e.g. 7HK4M2XP"
-                value={joinValue}
-                onChange={(e) => setJoinValue(e.target.value)}
-                maxLength={10}
-              />
-              <button
-                className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold"
-                onClick={() => onJoinSync(joinValue)}
-              >
-                Link
-              </button>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -1836,7 +1773,7 @@ const TABS = [
   { key: "setup", label: "Setup", icon: "⚙" },
 ];
 
-export default function App() {
+function AthleteApp({ currentUserId, userEmail, onSignOut }) {
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState("setup");
   const [profile, setProfileState] = useState(DEFAULT_PROFILE);
@@ -1855,11 +1792,11 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const existingCode = getSyncCode();
-      if (existingCode) {
+      setSyncUserId(currentUserId);
+      if (currentUserId) {
         setSyncStatus("syncing");
         try {
-          await pullFromCloud(existingCode);
+          await pullUserData(currentUserId);
           setSyncStatus("synced");
         } catch {
           setSyncStatus("error");
@@ -1881,42 +1818,7 @@ export default function App() {
       setTab(onboarded ? "log" : "setup");
       setReady(true);
     })();
-  }, []);
-
-  const [syncCodeState, setSyncCodeState] = useState(() => getSyncCode());
-
-  const startNewSync = useCallback(async () => {
-    const code = generateSyncCode();
-    setSyncCode(code);
-    setSyncCodeState(code);
-    setSyncStatus("syncing");
-    try {
-      await pushToCloud(code);
-      setSyncStatus("synced");
-    } catch {
-      setSyncStatus("error");
-    }
-  }, []);
-
-  const joinExistingSync = useCallback(async (code) => {
-    const clean = code.trim().toUpperCase();
-    if (!clean) return;
-    setSyncStatus("syncing");
-    try {
-      await pullFromCloud(clean);
-      setSyncCode(clean);
-      setSyncCodeState(clean);
-      window.location.reload(); // simplest way to reload every piece of state consistently
-    } catch {
-      setSyncStatus("error");
-    }
-  }, []);
-
-  const stopSyncing = useCallback(() => {
-    setSyncCode(null);
-    setSyncCodeState(null);
-    setSyncStatus("idle");
-  }, []);
+  }, [currentUserId]);
 
   const setProfile = useCallback((next) => {
     setProfileState(next);
@@ -2061,11 +1963,8 @@ export default function App() {
           <SetupScreen
             profile={profile}
             setProfile={setProfile}
-            syncCode={syncCodeState}
-            syncStatus={syncStatus}
-            onStartSync={startNewSync}
-            onJoinSync={joinExistingSync}
-            onStopSync={stopSyncing}
+            userEmail={userEmail}
+            onSignOut={onSignOut}
           />
         )}
         {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} />}
@@ -2100,5 +1999,73 @@ export default function App() {
         ))}
       </div>
     </div>
+  );
+}
+
+export default function Root() {
+  const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
+  const [profile, setProfile] = useState(null);
+  const [loadingProfile, setLoadingProfile] = useState(false);
+
+  const loadSessionAndProfile = useCallback(async () => {
+    const { data } = await supabase.auth.getSession();
+    setSession(data.session || null);
+    if (data.session) {
+      setLoadingProfile(true);
+      try {
+        const p = await getMyProfile(data.session.user.id);
+        setProfile(p);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoadingProfile(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSessionAndProfile();
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      if (!newSession) setProfile(null);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, [loadSessionAndProfile]);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setProfile(null);
+  };
+
+  if (session === undefined) {
+    return (
+      <div className="pe-app flex items-center justify-center" style={{ minHeight: "100vh" }}>
+        <div className="pe-mono text-sm" style={{ color: "#948A78" }}>Loading…</div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen onAuthed={loadSessionAndProfile} />;
+  }
+
+  if (loadingProfile || !profile) {
+    return (
+      <div className="pe-app flex items-center justify-center" style={{ minHeight: "100vh" }}>
+        <div className="pe-mono text-sm" style={{ color: "#948A78" }}>Loading your account…</div>
+      </div>
+    );
+  }
+
+  if (profile.role === "coach") {
+    return <CoachDashboard profile={profile} onSignOut={handleSignOut} />;
+  }
+
+  return (
+    <AthleteApp
+      currentUserId={session.user.id}
+      userEmail={session.user.email}
+      onSignOut={handleSignOut}
+    />
   );
 }
