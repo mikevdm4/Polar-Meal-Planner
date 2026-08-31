@@ -1,22 +1,19 @@
 # Polar Endurance — Meal Picker
 
-A client-facing meal picker: pick recipes, scale portions to bodyweight/goal, build a shopping list, and log daily meals (now including common snacks, drinks and alcohol). Built with React + Vite + Tailwind, with an optional cloud sync backend so a client's data follows them between phone and laptop.
+A client-facing meal picker: pick recipes, scale portions to bodyweight/goal, build a shopping list, and log daily meals (now including common snacks, drinks and alcohol). Built with React + Vite + Tailwind, with real accounts (via Supabase Auth) so an athlete's data follows them across devices, plus a coach dashboard.
 
 ---
 
-## How the sync backend works (read this first)
+## How accounts & sync work (read this first)
 
-By default, **all data lives only in the browser's local storage** — nothing syncs anywhere. That's fine for single-device use, but it means a client's phone and laptop see two completely separate, empty profiles.
+This app has **two account types**:
 
-To fix that, this project includes an **optional sync layer**:
+- **Athletes** sign up with email/password, optionally entering their coach's email to link their account. Once logged in, everything they do (profile, orders, daily logs) is saved to their own row in Supabase automatically — log in on a phone and a laptop with the same account and both show identical data. No manual codes to generate or share.
+- **Coaches** sign up separately (choosing "coach" at sign-up) and land on a **dashboard** listing every athlete who entered their email during sign-up. Clicking an athlete shows a read-only summary: their current profile settings, their active order, and their most recent daily logs.
 
-- A **Vercel serverless function** (`/api/sync.js`) — this runs on Vercel's servers, not in the browser, so it can safely hold a secret key
-- A **Supabase Postgres database** (free tier) — a single table (`sync_data`) storing one JSON blob per "sync code"
-- A **sync code** — an 8-character code (like `7HK4M2XP`) a client generates once on their first device, then types into the Setup tab on any other device to link it
+Security is handled by Supabase's **Row Level Security (RLS)** — see `supabase/schema.sql`. In plain terms: an athlete's browser can only ever read or write their own data, and a coach's browser can only *read* (never write) the data of athletes who linked to them at sign-up. This is enforced by the database itself, not just by the app's code, so it holds even if someone tried to call the API directly.
 
-There's **no password, no email, no user accounts** — the code itself *is* the key. Anyone with the code can read/write that data, so treat it like a shared PIN: fine for one person syncing their own two devices, not something to publish. If you later want real accounts (so you as the coach can see every client's data, or so losing a code doesn't mean losing data), that's a bigger step — see "Growing this into real accounts" at the bottom.
-
-**Conflict handling is intentionally simple:** last write wins. If someone edits their order on two devices at the exact same moment, whichever save reaches the server last overwrites the other. For a solo user syncing their own phone and laptop, this is a non-issue in practice.
+**This means the app's Supabase key is safe to include in the browser bundle** — unlike a typical secret API key, Supabase's anon/public key is designed to be public, precisely because RLS is what actually restricts access.
 
 ---
 
@@ -43,10 +40,11 @@ You now have the project on GitHub. Any time you make changes locally, `git add 
 
 1. Go to [supabase.com](https://supabase.com) and sign up (free tier is plenty for this).
 2. Click **New Project**. Give it a name, set a database password (save it somewhere, though you won't need it directly), pick a region close to you, and create it — takes about a minute to provision.
-3. Once it's ready, go to the **SQL Editor** (left sidebar) → **New query**, and paste in the contents of `supabase/schema.sql` from this project, then click **Run**. This creates the one table the app needs.
-4. Go to **Project Settings** (gear icon) → **API**. You need two values from this page:
+3. Once it's ready, go to the **SQL Editor** (left sidebar) → **New query**, and paste in the contents of `supabase/schema.sql` from this project, then click **Run**. This creates the two tables the app needs (`profiles` and `athlete_data`) with Row Level Security enabled.
+4. Go to **Authentication** (left sidebar) → **Providers**, and confirm **Email** is enabled (it is by default). Optionally, under **Authentication → Settings**, you can turn off "Confirm email" if you want athletes to be able to sign up and use the app immediately without clicking a confirmation link — handy while testing, though normally worth leaving on for a real rollout.
+5. Go to **Project Settings** (gear icon) → **API**. You need two values from this page:
    - **Project URL** (looks like `https://xxxxx.supabase.co`)
-   - **service_role key** (under "Project API keys" — click "Reveal" to see it). **Not** the `anon` key — the service_role key, since it needs to bypass row-level security from the server.
+   - **anon / public key** (under "Project API keys") — this one is fine to use in the browser, since Row Level Security is what actually restricts access, not secrecy of this key.
 
 Keep this tab open — you'll paste both values into Vercel in the next step.
 
@@ -60,23 +58,25 @@ Keep this tab open — you'll paste both values into Vercel in the next step.
 
    | Name | Value |
    |---|---|
-   | `SUPABASE_URL` | the Project URL from Supabase |
-   | `SUPABASE_SERVICE_KEY` | the service_role key from Supabase |
+   | `VITE_SUPABASE_URL` | the Project URL from Supabase |
+   | `VITE_SUPABASE_ANON_KEY` | the anon/public key from Supabase |
 
 4. Click **Deploy**. After a minute or two you'll get a live URL (something like `polar-meal-picker.vercel.app`).
 
-That's it — the frontend *and* the `/api/sync` backend function both deploy together automatically, since Vercel picks up anything in the `/api` folder as a serverless function with no extra configuration.
-
-**From now on:** any `git push` to your `main` branch automatically redeploys. To update environment variables later, go to your project on vercel.com → **Settings → Environment Variables**.
+**From now on:** any `git push` to your `main` branch automatically redeploys. To update environment variables later, go to your project on vercel.com → **Settings → Environment Variables** (and redeploy manually afterwards — env var changes need a fresh deploy to take effect, unlike ordinary code pushes).
 
 ---
 
-## Using sync as a client
+## Signing up as a coach or athlete
 
-1. Open the app, go to **Setup → Sync across devices**.
-2. Tap **Set up sync (new code)** — this generates a code and immediately saves the current device's data under it.
-3. On the second device, open the same app, go to **Setup → Sync across devices → I have a code**, type in the code, and tap **Link**. That device pulls down the first device's data.
-4. From then on, both devices push their changes to the same cloud record automatically in the background (a couple of seconds after any change, no button to press).
+1. Open the live app — you'll land on a sign-in screen.
+2. Tap **"New here? Create an account"**.
+3. Choose **Coach** or **Athlete**.
+   - **Coach**: just needs a name, email and password.
+   - **Athlete**: also has an optional "Your coach's email" field — entering the coach's email here is what links the athlete to that coach's dashboard. If left blank, the athlete can still use the app fully, just without a coach able to see their data.
+4. From then on, logging in on any device with the same email/password shows the same data automatically — no codes, no manual linking step.
+
+**As a coach**, your dashboard lists every athlete who entered your email at sign-up, with a summary of each one's current profile, order, and recent daily logs (read-only).
 
 ---
 
@@ -87,29 +87,25 @@ npm install
 npm run dev
 ```
 
-The `/api/sync` function won't work in plain `npm run dev` (that only serves the frontend) — to test the backend locally too, use the Vercel CLI instead:
-
-```bash
-npm install -g vercel
-vercel dev
-```
-
-This needs the same two environment variables available locally — either run `vercel env pull` after linking the project (`vercel link`), or create a `.env.local` file with:
+This needs the same two environment variables available locally — create a `.env.local` file in the project root with:
 
 ```
-SUPABASE_URL=https://xxxxx.supabase.co
-SUPABASE_SERVICE_KEY=your-service-role-key
+VITE_SUPABASE_URL=https://xxxxx.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
 
 ---
 
 ## What's in this project
 
-- `src/App.jsx` — the whole app (calculator, recipe browser, order builder, shopping list, daily log, gym tab, sync settings)
+- `src/App.jsx` — the whole athlete-facing app (calculator, recipe browser, order builder, shopping list, daily log, gym tab) plus the top-level routing between sign-in, the athlete app, and the coach dashboard
+- `src/Auth.jsx` — the sign-in/sign-up screen and the coach dashboard UI
+- `src/auth.js` — sign-up/sign-in/profile-lookup functions
+- `src/authSync.js` — pulls/pushes an athlete's data to their own Supabase row
+- `src/supabaseClient.js` — the Supabase client setup
 - `src/data.js` — every recipe plus the food database used for daily logging, now including common snacks, soft drinks, and alcoholic drinks (beer, wine, spirits, RTDs) so a full day's actual eating and drinking can be logged, not just "clean" meals
-- `src/cloudSync.js` — the client-side half of the sync feature
-- `api/sync.js` — the Vercel serverless function (the backend)
-- `supabase/schema.sql` — the one table the backend needs
+- `src/dietaryTags.js` — the gluten-free/dairy-free classification and substitution logic
+- `supabase/schema.sql` — the two tables (`profiles`, `athlete_data`) and Row Level Security policies the app needs
 
 ---
 
@@ -117,16 +113,18 @@ SUPABASE_SERVICE_KEY=your-service-role-key
 
 I looked at the Gousto Recipe Finder link — it's a search tool built on top of Gousto's own recipe catalogue. Recipe names, instructions, and photos from a commercial meal-kit company are their copyrighted content, and importing their catalogue wholesale into another product (even a personal one) isn't something I can do, regardless of which site is hosting it.
 
-What I can do instead, if useful: write more **original** recipes in that same Gousto-style register (quick, ingredient-forward, one-pan/one-tray formats) — the plan already has 200+ recipes built exactly that way. Just say which cuisines or formats you'd like more of, and I'll add them the same way as everything else in the app.
+What I can do instead, if useful: write more **original** recipes in that same Gousto-style register (quick, ingredient-forward, one-pan/one-tray formats) — the plan already has 300+ recipes built exactly that way. Just say which cuisines or formats you'd like more of, and I'll add them the same way as everything else in the app.
 
 ---
 
-## Growing this into real accounts (if you want it later)
+## What's built vs. what a bigger version would add
 
-The sync-code approach above is deliberately the lightest version that actually solves "my phone and laptop show different things." If down the line you want:
+This now has real accounts, proper login, and a coach dashboard — the core "athletes properly managed as a whole" foundation is in place, replacing the earlier device-code approach entirely.
 
-- **Real login** (email/password or magic link) so a lost code doesn't mean lost data
-- **You, the coach, able to see all your clients' data** in one place
-- **Proper per-client permissions**
+Not yet built, if useful later:
+- **Editing from the dashboard** — the coach view is currently read-only; a coach can see an athlete's data but not adjust it directly
+- **Password reset flow** — Supabase Auth supports this out of the box, just not wired into this UI yet
+- **Multiple coaches per organisation**, or an athlete having more than one coach
+- **Notifications** — e.g. a coach getting notified when an athlete logs something notable
 
-...that's a genuinely bigger step (adding Supabase Auth, a users table linking accounts to their data, and a coach-facing dashboard), but it builds directly on top of what's here — the `sync_data` table and `/api/sync` function would just get a real `user_id` instead of an anonymous code. Worth doing once you know this is being used for real, rather than building it speculatively now.
+Each of these is a genuine but bounded addition on top of what's here now, rather than a re-architecture.
