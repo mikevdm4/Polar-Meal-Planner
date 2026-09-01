@@ -3,25 +3,34 @@ import { supabase } from "./supabaseClient.js";
 import { signUp, signIn, getMyAthletes, getAthleteData } from "./auth.js";
 
 export function AuthScreen({ onAuthed }) {
-  const [mode, setMode] = useState("signin"); // signin | signup
+  const [mode, setMode] = useState("signin"); // signin | signup | forgot
   const [role, setRole] = useState("athlete");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [coachEmail, setCoachEmail] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
     setError("");
+    setInfo("");
     setLoading(true);
     try {
       if (mode === "signup") {
         await signUp({ email, password, role, displayName, coachEmail });
+        onAuthed();
+      } else if (mode === "forgot") {
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin,
+        });
+        if (resetError) throw resetError;
+        setInfo("Check your inbox for a password reset link.");
       } else {
         await signIn({ email, password });
+        onAuthed();
       }
-      onAuthed();
     } catch (e) {
       setError(e.message || "Something went wrong.");
     } finally {
@@ -37,7 +46,7 @@ export function AuthScreen({ onAuthed }) {
             Polar Endurance Coaching
           </div>
           <div className="pe-display text-2xl font-semibold" style={{ color: "#14403E" }}>
-            {mode === "signin" ? "Welcome back" : "Create your account"}
+            {mode === "signin" ? "Welcome back" : mode === "forgot" ? "Reset your password" : "Create your account"}
           </div>
         </div>
 
@@ -74,13 +83,17 @@ export function AuthScreen({ onAuthed }) {
             onChange={(e) => setEmail(e.target.value)}
           />
 
-          <label className="block text-sm font-medium mb-1.5">Password</label>
-          <input
-            type="password"
-            className="pe-input w-full px-3 py-2.5 mb-4 text-sm"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+          {mode !== "forgot" && (
+            <>
+              <label className="block text-sm font-medium mb-1.5">Password</label>
+              <input
+                type="password"
+                className="pe-input w-full px-3 py-2.5 mb-4 text-sm"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </>
+          )}
 
           {mode === "signup" && role === "athlete" && (
             <>
@@ -98,23 +111,120 @@ export function AuthScreen({ onAuthed }) {
             </>
           )}
 
+          {mode === "forgot" && (
+            <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+              Enter the email you signed up with and we'll send a link to set a new password.
+            </p>
+          )}
+
           {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+          {info && <p className="text-xs mb-3" style={{ color: "#4F6B41" }}>{info}</p>}
 
           <button
             className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm mb-3"
             onClick={submit}
-            disabled={loading || !email || !password}
-            style={loading || !email || !password ? { opacity: 0.6 } : {}}
+            disabled={loading || !email || (mode !== "forgot" && !password)}
+            style={loading || !email || (mode !== "forgot" && !password) ? { opacity: 0.6 } : {}}
           >
-            {loading ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
+            {loading
+              ? "Please wait…"
+              : mode === "signin"
+              ? "Sign in"
+              : mode === "forgot"
+              ? "Send reset link"
+              : "Create account"}
           </button>
+
+          {mode === "signin" && (
+            <button
+              className="w-full text-xs font-medium text-center mb-3"
+              style={{ color: "#948A78" }}
+              onClick={() => { setMode("forgot"); setError(""); setInfo(""); }}
+            >
+              Forgot password?
+            </button>
+          )}
 
           <button
             className="w-full text-xs font-medium text-center"
             style={{ color: "#14403E" }}
-            onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }}
+            onClick={() => {
+              setMode(mode === "signup" ? "signin" : mode === "forgot" ? "signin" : "signup");
+              setError(""); setInfo("");
+            }}
           >
-            {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
+            {mode === "signin"
+              ? "New here? Create an account"
+              : mode === "forgot"
+              ? "Back to sign in"
+              : "Already have an account? Sign in"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (password.length < 6) {
+      setError("Password needs to be at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords don't match.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const { error: updateError } = await supabase.auth.updateUser({ password });
+      if (updateError) throw updateError;
+      onDone();
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="pe-app flex items-center justify-center px-5" style={{ minHeight: "100vh" }}>
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-6">
+          <div className="text-[11px] font-semibold tracking-widest uppercase mb-1" style={{ color: "#14403E" }}>
+            Polar Endurance Coaching
+          </div>
+          <div className="pe-display text-2xl font-semibold" style={{ color: "#14403E" }}>Set a new password</div>
+        </div>
+        <div className="pe-card p-5">
+          <label className="block text-sm font-medium mb-1.5">New password</label>
+          <input
+            type="password"
+            className="pe-input w-full px-3 py-2.5 mb-4 text-sm"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <label className="block text-sm font-medium mb-1.5">Confirm new password</label>
+          <input
+            type="password"
+            className="pe-input w-full px-3 py-2.5 mb-4 text-sm"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+          {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+          <button
+            className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm"
+            onClick={submit}
+            disabled={loading || !password || !confirm}
+            style={loading || !password || !confirm ? { opacity: 0.6 } : {}}
+          >
+            {loading ? "Saving…" : "Save new password"}
           </button>
         </div>
       </div>

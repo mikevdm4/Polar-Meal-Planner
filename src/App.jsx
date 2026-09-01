@@ -5,7 +5,7 @@ import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
 import { getMyProfile } from "./auth.js";
 import { pullUserData } from "./authSync.js";
-import { AuthScreen, CoachDashboard } from "./Auth.jsx";
+import { AuthScreen, CoachDashboard, ResetPasswordScreen } from "./Auth.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
@@ -2007,6 +2007,7 @@ export default function Root() {
   const [profile, setProfile] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [profileError, setProfileError] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   const loadSessionAndProfile = useCallback(async () => {
     setProfileError(false);
@@ -2015,9 +2016,6 @@ export default function Root() {
     if (data.session) {
       setLoadingProfile(true);
       try {
-        // A profile row is created right after sign-up; on the very first
-        // load after signing up there can be a brief moment where it
-        // hasn't landed yet, so retry a couple of times before giving up.
         let p = null;
         for (let attempt = 0; attempt < 3; attempt++) {
           p = await getMyProfile(data.session.user.id);
@@ -2037,7 +2035,12 @@ export default function Root() {
 
   useEffect(() => {
     loadSessionAndProfile();
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecovery(true);
+        setSession(newSession);
+        return;
+      }
       setSession(newSession);
       if (!newSession) {
         setProfile(null);
@@ -2051,6 +2054,7 @@ export default function Root() {
     await supabase.auth.signOut();
     setProfile(null);
     setProfileError(false);
+    setPasswordRecovery(false);
   };
 
   if (session === undefined) {
@@ -2058,6 +2062,17 @@ export default function Root() {
       <div className="pe-app flex items-center justify-center" style={{ minHeight: "100vh" }}>
         <div className="pe-mono text-sm" style={{ color: "#948A78" }}>Loading…</div>
       </div>
+    );
+  }
+
+  if (passwordRecovery) {
+    return (
+      <ResetPasswordScreen
+        onDone={() => {
+          setPasswordRecovery(false);
+          loadSessionAndProfile();
+        }}
+      />
     );
   }
 
