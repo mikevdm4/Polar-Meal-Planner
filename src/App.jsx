@@ -2006,17 +2006,29 @@ export default function Root() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
   const [profile, setProfile] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
+  const [profileError, setProfileError] = useState(false);
 
   const loadSessionAndProfile = useCallback(async () => {
+    setProfileError(false);
     const { data } = await supabase.auth.getSession();
     setSession(data.session || null);
     if (data.session) {
       setLoadingProfile(true);
       try {
-        const p = await getMyProfile(data.session.user.id);
+        // A profile row is created right after sign-up; on the very first
+        // load after signing up there can be a brief moment where it
+        // hasn't landed yet, so retry a couple of times before giving up.
+        let p = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          p = await getMyProfile(data.session.user.id);
+          if (p) break;
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
         setProfile(p);
+        if (!p) setProfileError(true);
       } catch (e) {
         console.error(e);
+        setProfileError(true);
       } finally {
         setLoadingProfile(false);
       }
@@ -2027,7 +2039,10 @@ export default function Root() {
     loadSessionAndProfile();
     const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
       setSession(newSession);
-      if (!newSession) setProfile(null);
+      if (!newSession) {
+        setProfile(null);
+        setProfileError(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, [loadSessionAndProfile]);
@@ -2035,6 +2050,7 @@ export default function Root() {
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     setProfile(null);
+    setProfileError(false);
   };
 
   if (session === undefined) {
@@ -2047,6 +2063,26 @@ export default function Root() {
 
   if (!session) {
     return <AuthScreen onAuthed={loadSessionAndProfile} />;
+  }
+
+  if (profileError) {
+    return (
+      <div className="pe-app flex items-center justify-center px-6" style={{ minHeight: "100vh" }}>
+        <div className="w-full max-w-sm text-center">
+          <div className="text-4xl mb-3">⚠️</div>
+          <p className="pe-display text-lg font-semibold mb-2" style={{ color: "#14403E" }}>
+            We couldn't find your account
+          </p>
+          <p className="text-sm mb-5" style={{ color: "#6B6355" }}>
+            You're signed in, but no profile is set up for this account yet. This can happen if sign-up was
+            interrupted partway through. Try signing out and creating your account again.
+          </p>
+          <button className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm" onClick={handleSignOut}>
+            Back to sign in
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (loadingProfile || !profile) {
