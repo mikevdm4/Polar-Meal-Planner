@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient.js";
-import { signUp, signIn, getMyAthletes, getAthleteData } from "./auth.js";
+import { signUp, signIn, getMyAthletes, getAthleteData, getPendingCoaches, approveCoach, rejectCoach } from "./auth.js";
 
 export function AuthScreen({ onAuthed }) {
   const [mode, setMode] = useState("signin"); // signin | signup | forgot
@@ -232,11 +232,145 @@ export function ResetPasswordScreen({ onDone }) {
   );
 }
 
+export function PendingApprovalScreen({ email, onSignOut }) {
+  return (
+    <div className="pe-app flex items-center justify-center px-6" style={{ minHeight: "100vh" }}>
+      <div className="w-full max-w-sm text-center">
+        <div className="text-4xl mb-3">⏳</div>
+        <p className="pe-display text-lg font-semibold mb-2" style={{ color: "#14403E" }}>
+          Your coach account is awaiting approval
+        </p>
+        <p className="text-sm mb-5" style={{ color: "#6B6355" }}>
+          {email} has been created, but a coach account needs to be approved before it can be used. You'll be
+          able to sign in as normal once that's done — check back shortly, or get in touch if it's been a while.
+        </p>
+        <button className="pe-btn-secondary w-full py-3 rounded-full font-semibold text-sm" onClick={onSignOut}>
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function AdminApprovals({ onOpenCoachDashboard, isAlsoCoach, onSignOut }) {
+  const [pending, setPending] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState("");
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const list = await getPendingCoaches();
+      setPending(list);
+    } catch (e) {
+      setError(e.message || "Couldn't load pending coaches.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const handleApprove = async (id) => {
+    setBusyId(id);
+    try {
+      await approveCoach(id);
+      setPending((prev) => prev.filter((p) => p.id !== id));
+    } catch (e) {
+      setError(e.message || "Couldn't approve that account.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleReject = async (id) => {
+    setBusyId(id);
+    try {
+      await rejectCoach(id);
+      setPending((prev) => prev.filter((p) => p.id !== id));
+    } catch (e) {
+      setError(e.message || "Couldn't remove that account.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="pe-app" style={{ minHeight: "100vh" }}>
+      <div className="pe-header px-5 pt-6 pb-5">
+        <div className="relative flex items-center justify-between">
+          <div>
+            <div className="text-[11px] font-semibold tracking-widest uppercase mb-1" style={{ color: "#9FC4BE" }}>
+              Admin
+            </div>
+            <div className="pe-display text-2xl font-semibold">Coach approvals</div>
+          </div>
+          <button
+            className="text-xs font-medium px-3 py-1.5 rounded-full"
+            style={{ background: "rgba(255,255,255,0.15)", color: "#F5F4EE" }}
+            onClick={onSignOut}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+
+      <div className="px-4 py-4 max-w-2xl mx-auto">
+        {isAlsoCoach && (
+          <button
+            className="pe-chip px-4 py-2 text-xs font-medium mb-4"
+            onClick={onOpenCoachDashboard}
+          >
+            → Go to my coach dashboard
+          </button>
+        )}
+
+        <h2 className="pe-display text-lg font-semibold mb-3" style={{ color: "#14403E" }}>
+          Pending coaches ({pending.length})
+        </h2>
+
+        {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+        {loading && <p className="text-sm" style={{ color: "#948A78" }}>Loading…</p>}
+
+        {!loading && pending.length === 0 && (
+          <p className="text-sm" style={{ color: "#948A78" }}>No coach accounts waiting for approval.</p>
+        )}
+
+        {pending.map((p) => (
+          <div key={p.id} className="pe-card p-4 mb-2.5 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">{p.display_name || p.email}</div>
+              <div className="text-xs" style={{ color: "#948A78" }}>{p.email}</div>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <button
+                className="pe-btn-secondary px-3 py-1.5 rounded-full text-xs font-semibold"
+                disabled={busyId === p.id}
+                onClick={() => handleReject(p.id)}
+              >
+                Reject
+              </button>
+              <button
+                className="pe-btn-primary px-3 py-1.5 rounded-full text-xs font-semibold"
+                disabled={busyId === p.id}
+                onClick={() => handleApprove(p.id)}
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function round(n) {
   return Math.round(n || 0);
 }
 
-export function CoachDashboard({ profile, onSignOut }) {
+export function CoachDashboard({ profile, onSignOut, onBackToAdmin }) {
   const [athletes, setAthletes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
@@ -282,13 +416,24 @@ export function CoachDashboard({ profile, onSignOut }) {
             </div>
             <div className="pe-display text-2xl font-semibold">Polar Endurance</div>
           </div>
-          <button
-            className="text-xs font-medium px-3 py-1.5 rounded-full"
-            style={{ background: "rgba(255,255,255,0.15)", color: "#F5F4EE" }}
-            onClick={onSignOut}
-          >
-            Sign out
-          </button>
+          <div className="flex items-center gap-2">
+            {onBackToAdmin && (
+              <button
+                className="text-xs font-medium px-3 py-1.5 rounded-full"
+                style={{ background: "rgba(255,255,255,0.15)", color: "#F5F4EE" }}
+                onClick={onBackToAdmin}
+              >
+                ← Admin
+              </button>
+            )}
+            <button
+              className="text-xs font-medium px-3 py-1.5 rounded-full"
+              style={{ background: "rgba(255,255,255,0.15)", color: "#F5F4EE" }}
+              onClick={onSignOut}
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </div>
 

@@ -5,7 +5,7 @@ import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
 import { getMyProfile } from "./auth.js";
 import { pullUserData } from "./authSync.js";
-import { AuthScreen, CoachDashboard, ResetPasswordScreen } from "./Auth.jsx";
+import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
@@ -2109,6 +2109,17 @@ export default function Root() {
   }
 
   if (profile.role === "coach") {
+    if (profile.is_super_admin) {
+      return (
+        <RootAdminOrCoach
+          profile={profile}
+          onSignOut={handleSignOut}
+        />
+      );
+    }
+    if (!profile.approved) {
+      return <PendingApprovalScreen email={profile.email} onSignOut={handleSignOut} />;
+    }
     return <CoachDashboard profile={profile} onSignOut={handleSignOut} />;
   }
 
@@ -2117,6 +2128,20 @@ export default function Root() {
       currentUserId={session.user.id}
       userEmail={session.user.email}
       onSignOut={handleSignOut}
+    />
+  );
+}
+
+function RootAdminOrCoach({ profile, onSignOut }) {
+  const [view, setView] = useState("admin"); // admin | coach
+  if (view === "coach") {
+    return <CoachDashboard profile={profile} onSignOut={onSignOut} onBackToAdmin={() => setView("admin")} />;
+  }
+  return (
+    <AdminApprovals
+      isAlsoCoach
+      onOpenCoachDashboard={() => setView("coach")}
+      onSignOut={onSignOut}
     />
   );
 }

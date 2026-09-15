@@ -23,6 +23,7 @@ export async function signUp({ email, password, role, displayName, coachEmail })
     role,
     display_name: displayName || email,
     coach_id: coachId,
+    approved: role === "athlete", // coaches need manual approval; athletes don't
   });
   if (profileError) throw profileError;
 
@@ -64,4 +65,25 @@ export async function getAthleteData(userId) {
   const { data, error } = await supabase.from("athlete_data").select("data, updated_at").eq("user_id", userId).maybeSingle();
   if (error) throw error;
   return data;
+}
+
+export async function getPendingCoaches() {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("role", "coach")
+    .eq("approved", false)
+    .order("created_at");
+  if (error) throw error;
+  return data || [];
+}
+
+export async function approveCoach(coachId) {
+  const { error } = await supabase.from("profiles").update({ approved: true }).eq("id", coachId);
+  if (error) throw error;
+}
+
+export async function rejectCoach(coachId) {
+  const { error } = await supabase.from("profiles").delete().eq("id", coachId);
+  if (error) throw error;
 }
