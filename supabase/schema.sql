@@ -1,12 +1,80 @@
--- Run this once in your Supabase project's SQL editor (Supabase dashboard -> SQL Editor -> New query).
+-- Run this in your Supabase project's SQL editor (Supabase dashboard -> SQL Editor -> New query).
+--
+-- This replaces the old anonymous sync-code approach with real accounts:
+-- every user (athlete or coach) gets a row in `profiles`, and each athlete's
+-- app data lives in `athlete_data`, keyed to their real account.
 
-create table if not exists sync_data (
-  code text primary key,
-  data jsonb not null,
+-- One row per signed-up user (both athletes and coaches).
+create table if not exists profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text unique,
+  role text not null default 'athlete' check (role in ('athlete', 'coach')),
+  coach_id uuid references profiles(id) on delete set null,
+  display_name text,
+  approved boolean not null default true,
+  is_super_admin boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+-- If you're updating an existing database rather than starting fresh,
+-- these two lines add the new columns without touching existing rows
+-- (safe to run even if the columns already exist).
+alter table profiles add column if not exists approved boolean not null default true;
+alter table profiles add column if not exists is_super_admin boolean not null default false;
+
+-- One row per athlete, holding their full app data as a JSON blob
+-- (same shape as before: profile, cart, logs, order history, etc).
+create table if not exists athlete_data (
+  user_id uuid primary key references profiles(id) on delete cascade,
+  data jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
 );
 
--- Row Level Security stays enabled with no public policies — the app never
--- talks to Supabase directly from the browser. Only the Vercel serverless
--- function (using the service_role key, which bypasses RLS) can read/write.
-alter table sync_data enable row level security;
+alter table profiles enable row level security;
+alter table athlete_data enable row level security;
+
+-- Everyone can read and update their own profile.
+create policy "read own profile" on profiles
+  for select using (auth.uid() = id);
+
+create policy "update own profile" on profiles
+  for update using (auth.uid() = id);
+
+-- Anyone can insert their own profile row once (needed at sign-up time).
+create policy "insert own profile" on profiles
+  for insert with check (auth.uid() = id);
+
+-- A coach can see the profiles of athletes linked to them.
+create policy "coach reads own athletes" on profiles
+  for select using (coach_id = auth.uid());
+
+-- Super admins (you) can see and approve every profile.
+create policy "super admin reads all profiles" on profiles
+  for select using (
+    exists (select 1 from profiles me where me.id = auth.uid() and me.is_super_admin = true)
+  );
+
+create policy "super admin updates all profiles" on profiles
+  for update using (
+    exists (select 1 from profiles me where me.id = auth.uid() and me.is_super_admin = true)
+  );
+
+-- Athletes can read and write their own data.
+create policy "athlete reads own data" on athlete_data
+  for select using (auth.uid() = user_id);
+
+create policy "athlete inserts own data" on athlete_data
+  for insert with check (auth.uid() = user_id);
+
+create policy "athlete updates own data" on athlete_data
+  for update using (auth.uid() = user_id);
+
+-- A coach can read (but not write) the data of any athlete linked to them.
+create policy "coach reads athlete data" on athlete_data
+  for select using (
+    exists (
+      select 1 from profiles pr
+      where pr.id = athlete_data.user_id
+      and pr.coach_id = auth.uid()
+    )
+  );
