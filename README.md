@@ -9,9 +9,9 @@ A client-facing meal picker: pick recipes, scale portions to bodyweight/goal, bu
 This app has **two account types**:
 
 - **Athletes** sign up with email/password, optionally entering their coach's email to link their account. Once logged in, everything they do (profile, orders, daily logs) is saved to their own row in Supabase automatically — log in on a phone and a laptop with the same account and both show identical data. No manual codes to generate or share.
-- **Coaches** sign up separately (choosing "coach" at sign-up) and land on a **dashboard** listing every athlete who entered their email during sign-up. Clicking an athlete shows a read-only summary: their current profile settings, their active order, and their most recent daily logs.
+- **Coaches** sign up separately (choosing "coach" at sign-up), but **new coach accounts need approval before they can be used** — see "Approving coaches" below. Once approved, a coach lands on a **dashboard** listing every athlete who entered their email during sign-up. Clicking an athlete shows a read-only summary: their current profile settings, their active order, and their most recent daily logs.
 
-Security is handled by Supabase's **Row Level Security (RLS)** — see `supabase/schema.sql`. In plain terms: an athlete's browser can only ever read or write their own data, and a coach's browser can only *read* (never write) the data of athletes who linked to them at sign-up. This is enforced by the database itself, not just by the app's code, so it holds even if someone tried to call the API directly.
+Security is handled by Supabase's **Row Level Security (RLS)** — see `supabase/schema.sql`. In plain terms: an athlete's browser can only ever read or write their own data, a coach's browser can only *read* (never write) the data of athletes who linked to them at sign-up, and only an account flagged as a super-admin can see or approve pending coach sign-ups. This is enforced by the database itself, not just by the app's code, so it holds even if someone tried to call the API directly.
 
 **This means the app's Supabase key is safe to include in the browser bundle** — unlike a typical secret API key, Supabase's anon/public key is designed to be public, precisely because RLS is what actually restricts access.
 
@@ -40,7 +40,7 @@ You now have the project on GitHub. Any time you make changes locally, `git add 
 
 1. Go to [supabase.com](https://supabase.com) and sign up (free tier is plenty for this).
 2. Click **New Project**. Give it a name, set a database password (save it somewhere, though you won't need it directly), pick a region close to you, and create it — takes about a minute to provision.
-3. Once it's ready, go to the **SQL Editor** (left sidebar) → **New query**, and paste in the contents of `supabase/schema.sql` from this project, then click **Run**. This creates the two tables the app needs (`profiles` and `athlete_data`) with Row Level Security enabled.
+3. Once it's ready, go to the **SQL Editor** (left sidebar) → **New query**, and paste in the contents of `supabase/schema.sql` from this project, then click **Run**. This creates the two tables the app needs (`profiles` and `athlete_data`) with Row Level Security enabled, including an `approved` and `is_super_admin` flag on `profiles` used for coach approval. If you're updating an existing database rather than starting fresh, this same file safely adds those two columns without touching any existing rows.
 4. Go to **Authentication** (left sidebar) → **Providers**, and confirm **Email** is enabled (it is by default). Optionally, under **Authentication → Settings**, you can turn off "Confirm email" if you want athletes to be able to sign up and use the app immediately without clicking a confirmation link — handy while testing, though normally worth leaving on for a real rollout.
 5. Go to **Project Settings** (gear icon) → **API**. You need two values from this page:
    - **Project URL** (looks like `https://xxxxx.supabase.co`)
@@ -80,6 +80,23 @@ Keep this tab open — you'll paste both values into Vercel in the next step.
 
 ---
 
+## Approving coaches (this is the part only you can do)
+
+New coach accounts don't get dashboard access immediately — they need approval first, so random sign-ups can't just start seeing athlete data. Here's the one-time setup, plus how approval works day to day.
+
+**One-time setup — flagging your own account as super-admin:**
+
+1. Sign up on your live site as a coach yourself, if you haven't already.
+2. In Supabase, go to **Table Editor** (left sidebar) → **profiles**.
+3. Find your row (by email), click into the `is_super_admin` cell, and set it to `true`. Save.
+4. Sign out of the app and back in. Instead of the usual coach dashboard, you'll now land on a **"Coach approvals"** screen — this is the admin view, and only your account (or any other account you flag this way) can see it.
+
+**Day to day:** whenever someone signs up as a coach, they land on an "awaiting approval" screen and can't do anything until you act. Your admin view lists every pending coach with **Approve** and **Reject** buttons. Since you're presumably coaching your own athletes too, there's a **"→ Go to my coach dashboard"** link at the top of the admin screen to switch into your normal coach view whenever you want.
+
+**Athletes are unaffected by any of this** — they get full access immediately at sign-up, same as before.
+
+---
+
 ## Run it locally before deploying
 
 ```bash
@@ -98,14 +115,14 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 
 ## What's in this project
 
-- `src/App.jsx` — the whole athlete-facing app (calculator, recipe browser, order builder, shopping list, daily log, gym tab) plus the top-level routing between sign-in, the athlete app, and the coach dashboard
-- `src/Auth.jsx` — the sign-in/sign-up screen and the coach dashboard UI
-- `src/auth.js` — sign-up/sign-in/profile-lookup functions
+- `src/App.jsx` — the whole athlete-facing app (calculator, recipe browser, order builder, shopping list, daily log, gym tab) plus the top-level routing between sign-in, the athlete app, the coach dashboard, and the admin approvals screen
+- `src/Auth.jsx` — the sign-in/sign-up screen, the coach dashboard, the pending-approval screen, and the admin approvals UI
+- `src/auth.js` — sign-up/sign-in/profile-lookup functions, plus coach approval/rejection
 - `src/authSync.js` — pulls/pushes an athlete's data to their own Supabase row
 - `src/supabaseClient.js` — the Supabase client setup
 - `src/data.js` — every recipe plus the food database used for daily logging, now including common snacks, soft drinks, and alcoholic drinks (beer, wine, spirits, RTDs) so a full day's actual eating and drinking can be logged, not just "clean" meals
 - `src/dietaryTags.js` — the gluten-free/dairy-free classification and substitution logic
-- `supabase/schema.sql` — the two tables (`profiles`, `athlete_data`) and Row Level Security policies the app needs
+- `supabase/schema.sql` — the two tables (`profiles`, `athlete_data`), the `approved`/`is_super_admin` flags, and the Row Level Security policies the app needs
 
 ---
 
@@ -119,12 +136,11 @@ What I can do instead, if useful: write more **original** recipes in that same G
 
 ## What's built vs. what a bigger version would add
 
-This now has real accounts, proper login, and a coach dashboard — the core "athletes properly managed as a whole" foundation is in place, replacing the earlier device-code approach entirely.
+This now has real accounts, proper login, coach approval (only you can let a new coach account through), a password reset flow, and a coach dashboard — the core "athletes properly managed as a whole" foundation is in place, replacing the earlier device-code approach entirely.
 
 Not yet built, if useful later:
 - **Editing from the dashboard** — the coach view is currently read-only; a coach can see an athlete's data but not adjust it directly
-- **Password reset flow** — Supabase Auth supports this out of the box, just not wired into this UI yet
 - **Multiple coaches per organisation**, or an athlete having more than one coach
-- **Notifications** — e.g. a coach getting notified when an athlete logs something notable
+- **Notifications** — e.g. a coach getting notified when an athlete logs something notable, or a coach being emailed when a new sign-up is awaiting their approval
 
 Each of these is a genuine but bounded addition on top of what's here now, rather than a re-architecture.
