@@ -40,6 +40,35 @@ create policy "read own profile" on profiles
 create policy "update own profile" on profiles
   for update using (auth.uid() = id);
 
+-- SECURITY: the policy above only checks "is this your own row" — it does
+-- NOT stop you from changing which columns get updated. Without anything
+-- more, any signed-in user could set their own role/approved/is_super_admin
+-- straight to coach-approved-admin via a direct API call, completely
+-- bypassing the approval flow built into the app. Postgres RLS can't
+-- restrict individual columns on its own, so a trigger enforces it instead:
+-- ordinary users can update their own coach_id, display_name, etc. freely
+-- (that's the coach-linking feature), but role/approved/is_super_admin are
+-- silently locked to their existing value unless the person making the
+-- change is already a super-admin.
+create or replace function prevent_self_privilege_escalation()
+returns trigger as $$
+begin
+  if not exists (
+    select 1 from profiles me where me.id = auth.uid() and me.is_super_admin = true
+  ) then
+    new.role := old.role;
+    new.approved := old.approved;
+    new.is_super_admin := old.is_super_admin;
+  end if;
+  return new;
+end;
+$$ language plpgsql security definer;
+
+drop trigger if exists lock_privileged_fields on profiles;
+create trigger lock_privileged_fields
+  before update on profiles
+  for each row execute function prevent_self_privilege_escalation();
+
 -- Anyone can insert their own profile row once (needed at sign-up time).
 create policy "insert own profile" on profiles
   for insert with check (auth.uid() = id);
