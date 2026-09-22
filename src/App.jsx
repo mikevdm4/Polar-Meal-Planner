@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
-import { schedulePushUserData } from "./authSync.js";
-import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
+import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
 import { getMyProfile } from "./auth.js";
 import { pullUserData } from "./authSync.js";
@@ -35,7 +34,9 @@ const INGREDIENT_GROUPS = (() => {
       } else {
         if (item.proteinFood) proteins.add(item.proteinFood);
         if (item.carbFood) carbs.add(item.carbFood);
-        if (item.vegFood) vegs.add(item.vegFood);
+        (item.extras || []).forEach((e) => {
+          (e.category === "Proteins" ? proteins : e.category === "Vegetables" ? vegs : carbs).add(e.food);
+        });
       }
     });
   });
@@ -116,19 +117,29 @@ function mealTarget(sectionName, targets) {
 }
 
 function scaledMacros(item, target) {
-  const proteinPortion = target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : 0;
+  const usesFixedProtein = !!item.fixedProteinGrams;
+  const proteinPortion = usesFixedProtein
+    ? item.fixedProteinGrams
+    : target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : 0;
+  // For fixed-portion veggie protein sources, this is what a full target-matching
+  // portion would require — shown as advisory text only, never used in the totals.
+  const proteinTargetEquivalent =
+    usesFixedProtein && target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : null;
   const carbPortion = target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
   const proteinG = (proteinPortion * item.proteinPer100) / 100;
   const carbG = (carbPortion * item.carbPer100) / 100;
+  const extras = item.extras || [];
+  const extrasCalories = extras.reduce((sum, e) => sum + (e.grams * e.kcalPer100) / 100, 0);
+  const extrasFat = extras.reduce((sum, e) => sum + (e.grams * (e.fatPer100 || 0)) / 100, 0);
   const calories =
     (proteinPortion * item.proteinKcalPer100) / 100 +
     (carbPortion * item.carbKcalPer100) / 100 +
-    (item.vegFood ? (item.vegGrams * item.vegKcalPer100) / 100 : 0);
+    extrasCalories;
   const fat =
     (proteinPortion * (item.proteinFatPer100 || 0)) / 100 +
     (carbPortion * (item.carbFatPer100 || 0)) / 100 +
-    (item.vegFood ? (item.vegGrams * (item.vegFatPer100 || 0)) / 100 : 0);
-  return { proteinPortion, carbPortion, proteinG, carbG, calories, fat };
+    extrasFat;
+  return { proteinPortion, carbPortion, proteinG, carbG, calories, fat, usesFixedProtein, proteinTargetEquivalent };
 }
 
 function fixedMacros(item) {
@@ -175,7 +186,7 @@ function ContourSVG() {
   );
 }
 
-function SetupScreen({ profile, setProfile, userEmail, onSignOut }) {
+function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, isOnline }) {
   return (
     <div className="pe-fadein max-w-md mx-auto px-5 py-6">
       <h2 className="pe-display text-2xl font-semibold mb-1" style={{ color: "#14403E" }}>Your details</h2>
@@ -238,6 +249,23 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut }) {
           Signed in as <strong>{userEmail}</strong>. Your data syncs automatically to any device you log into
           with this account.
         </p>
+        <div className="flex items-center gap-1.5 mb-3">
+          <span
+            className="inline-block w-2 h-2 rounded-full"
+            style={{
+              background: !isOnline ? "#B5652F" : syncStatus === "error" ? "#B5652F" : syncStatus === "syncing" ? "#D4A15C" : "#4F6B41",
+            }}
+          />
+          <span className="text-xs" style={{ color: "#6B6355" }}>
+            {!isOnline
+              ? "Offline — will sync automatically once reconnected"
+              : syncStatus === "syncing"
+              ? "Syncing…"
+              : syncStatus === "error"
+              ? "Couldn't sync last change — will retry automatically"
+              : "Synced"}
+          </span>
+        </div>
         <button className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold" onClick={onSignOut}>
           Sign out
         </button>
@@ -532,6 +560,11 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function nowTimeStr() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function entryMacros(entry) {
   if (entry.type === "food") {
     const factor = entry.grams / 100;
@@ -651,6 +684,7 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
       baseProtein: finalMacros.protein,
       baseCarbs: finalMacros.carbs,
       baseFat: finalMacros.fat,
+      time: nowTimeStr(),
       proteinOverride:
         customizeOpen && customProteinFood && customProteinFood !== pendingItem.proteinFood
           ? { food: customProteinFood, grams: Number(customProteinGrams) }
@@ -732,6 +766,14 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
               <button className="pe-btn-primary w-6 h-6 rounded-full text-xs font-bold" onClick={() => adjustServings(0.25)}>+</button>
             </div>
           </div>
+
+          {baseMacros && baseMacros.usesFixedProtein && baseMacros.proteinTargetEquivalent && (
+            <div className="rounded-lg p-2.5 mb-3 text-[11px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              This uses a normal serving of {pendingItem.proteinFood.toLowerCase()} ({round(baseMacros.proteinPortion)}g) rather than scaling it
+              to your full protein target (which would need ~{round(baseMacros.proteinTargetEquivalent)}g — unrealistic as a single portion).
+              Consider pairing with an extra protein source to close the gap.
+            </div>
+          )}
 
           {!isFixed && (
             <>
@@ -835,17 +877,19 @@ function GymScreen({ profile, onAddToTodayLog, onViewRecipe }) {
   );
 }
 
-function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe }) {
+function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [query, setQuery] = useState("");
   const [pendingFood, setPendingFood] = useState(null);
   const [pendingGrams, setPendingGrams] = useState(100);
+  const [pendingTime, setPendingTime] = useState(() => nowTimeStr());
   const [manualOpen, setManualOpen] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualCal, setManualCal] = useState("");
   const [manualProtein, setManualProtein] = useState("");
   const [manualCarbs, setManualCarbs] = useState("");
   const [manualFat, setManualFat] = useState("");
+  const [manualTime, setManualTime] = useState(() => nowTimeStr());
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
   const dayLog = logsByDate[selectedDate] || [];
@@ -871,15 +915,38 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     );
   }, [dayLog]);
 
+  const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
+
   const addFood = () => {
     if (!pendingFood || !pendingGrams) return;
-    updateDayLog(selectedDate, [
-      ...dayLog,
-      { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams) },
-    ]);
+    if (editingFoodEntryId) {
+      updateDayLog(
+        selectedDate,
+        dayLog.map((e) =>
+          e.id === editingFoodEntryId
+            ? { ...e, food: pendingFood, grams: Number(pendingGrams), time: pendingTime }
+            : e
+        )
+      );
+      setEditingFoodEntryId(null);
+    } else {
+      updateDayLog(selectedDate, [
+        ...dayLog,
+        { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams), time: pendingTime },
+      ]);
+    }
     setPendingFood(null);
     setQuery("");
     setPendingGrams(100);
+    setPendingTime(nowTimeStr());
+  };
+
+  const openEditFoodEntry = (entry) => {
+    setPendingFood(entry.food);
+    setQuery(entry.food.name);
+    setPendingGrams(entry.grams);
+    setPendingTime(entry.time || nowTimeStr());
+    setEditingFoodEntryId(entry.id);
   };
 
   const addMealEntry = (entry) => updateDayLog(selectedDate, [...dayLog, entry]);
@@ -887,27 +954,97 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const setEntryServings = (id, servings) =>
     updateDayLog(selectedDate, dayLog.map((e) => (e.id === id ? { ...e, servings: Math.max(0.25, servings) } : e)));
 
+  const [editingEntryId, setEditingEntryId] = useState(null);
+
   const addManualEntry = () => {
-    if (!manualName || !manualCal) return;
-    updateDayLog(selectedDate, [
-      ...dayLog,
-      {
-        id: Date.now(),
-        type: "manual",
-        name: manualName,
-        calories: Number(manualCal) || 0,
-        protein: Number(manualProtein) || 0,
-        carbs: Number(manualCarbs) || 0,
-        fat: Number(manualFat) || 0,
-      },
-    ]);
+    if (!manualName) return;
+    const hasNumbers = manualCal !== "";
+    const newEntry = {
+      id: editingEntryId || Date.now(),
+      type: "manual",
+      name: manualName,
+      calories: Number(manualCal) || 0,
+      protein: Number(manualProtein) || 0,
+      carbs: Number(manualCarbs) || 0,
+      fat: Number(manualFat) || 0,
+      time: manualTime,
+      quantified: hasNumbers,
+    };
+    if (editingEntryId) {
+      updateDayLog(selectedDate, dayLog.map((e) => (e.id === editingEntryId ? newEntry : e)));
+    } else {
+      updateDayLog(selectedDate, [...dayLog, newEntry]);
+    }
     setManualName(""); setManualCal(""); setManualProtein(""); setManualCarbs(""); setManualFat("");
+    setManualTime(nowTimeStr());
     setManualOpen(false);
+    setEditingEntryId(null);
+  };
+
+  const openEditManualEntry = (entry) => {
+    setManualName(entry.name);
+    setManualCal(entry.calories ? String(entry.calories) : "");
+    setManualProtein(entry.protein ? String(entry.protein) : "");
+    setManualCarbs(entry.carbs ? String(entry.carbs) : "");
+    setManualFat(entry.fat ? String(entry.fat) : "");
+    setManualTime(entry.time || nowTimeStr());
+    setEditingEntryId(entry.id);
+    setManualOpen(true);
+  };
+
+  const exportLogCSV = () => {
+    const rows = [["Date", "Time", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Day notes"]];
+    const dates = Object.keys(logsByDate).sort();
+    dates.forEach((date) => {
+      const entries = logsByDate[date] || [];
+      const notes = dayNotes?.[date] || "";
+      if (entries.length === 0 && !notes) return;
+      if (entries.length === 0) {
+        rows.push([date, "", "", "", "", "", "", "", "", notes]);
+        return;
+      }
+      entries.forEach((entry, i) => {
+        const m = entryMacros(entry);
+        const name = entry.type === "food" ? entry.food.name : entry.name;
+        const qty =
+          entry.type === "food" ? `${entry.grams}g` :
+          entry.type === "manual" ? "manual entry" :
+          `${entry.servings || 1}x serving`;
+        const notYetQuantified = entry.type === "manual" && entry.quantified === false;
+        rows.push([
+          date, entry.time || "", entry.type, name, qty,
+          notYetQuantified ? "not yet quantified" : round(m.calories),
+          notYetQuantified ? "" : round(m.protein),
+          notYetQuantified ? "" : round(m.carbs),
+          notYetQuantified ? "" : round(m.fat),
+          i === 0 ? notes : "", // notes only on the first row of that day, to avoid repeating
+        ]);
+      });
+    });
+    const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `polar-endurance-food-log-${todayStr()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
-      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Daily log</h2>
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="pe-display text-xl font-semibold" style={{ color: "#14403E" }}>Daily log</h2>
+        <button
+          className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+          onClick={exportLogCSV}
+          title="Download your entire food log history as a spreadsheet (opens in Excel)"
+        >
+          ⬇ Export
+        </button>
+      </div>
       <p className="text-xs mb-4" style={{ color: "#948A78" }}>
         Log meals or individual foods and see them stack up against your daily target. Each day is saved separately.
       </p>
@@ -947,6 +1084,23 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         <ProgressBar label="Protein" consumed={totals.protein} target={targets.protein} unit="g" />
         <ProgressBar label="Carbs" consumed={totals.carbs} target={targets.carbs} unit="g" />
         <ProgressBar label="Fat" consumed={totals.fat} target={targets.fat} unit="g" />
+      </div>
+
+      <div className="pe-card p-4 mb-4">
+        <div className="pe-display text-sm font-semibold mb-1.5" style={{ color: "#14403E" }}>
+          How are you feeling today?
+        </div>
+        <p className="text-xs mb-2" style={{ color: "#948A78" }}>
+          Bloating, energy, digestion, mood — anything worth tracking alongside what you ate. Useful for spotting
+          patterns over time, including with a coach or GP.
+        </p>
+        <textarea
+          className="pe-input w-full px-3 py-2 text-sm"
+          rows={3}
+          placeholder="e.g. Felt bloated after lunch, low energy this afternoon..."
+          value={dayNotes?.[selectedDate] || ""}
+          onChange={(e) => updateDayNotes(selectedDate, e.target.value)}
+        />
       </div>
 
       <AddMealLog profile={profile} onAdd={addMealEntry} onViewRecipe={onViewRecipe} />
@@ -990,9 +1144,24 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
               placeholder="grams"
             />
             <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+            <input
+              type="time"
+              className="pe-input px-2 py-2 text-sm"
+              value={pendingTime}
+              onChange={(e) => setPendingTime(e.target.value)}
+            />
             <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
-              Add
+              {editingFoodEntryId ? "Save" : "Add"}
             </button>
+            {editingFoodEntryId && (
+              <button
+                className="text-xs font-medium"
+                style={{ color: "#948A78" }}
+                onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams(100); setEditingFoodEntryId(null); }}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1037,14 +1206,42 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
               </div>
             </div>
+            <div className="mb-3">
+              <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
+              <input
+                type="time"
+                className="pe-input px-2 py-2 text-sm"
+                value={manualTime}
+                onChange={(e) => setManualTime(e.target.value)}
+              />
+            </div>
+            <p className="text-[11px] mb-3" style={{ color: "#948A78" }}>
+              Just tracking what you ate for now? Leave the numbers blank and add them later — useful if you're
+              trying to spot which foods trigger something and don't want the calorie lookup to slow you down in
+              the moment.
+            </p>
             <button
               className="pe-btn-primary w-full py-2.5 rounded-full text-xs font-semibold"
               onClick={addManualEntry}
-              disabled={!manualName || !manualCal}
-              style={!manualName || !manualCal ? { opacity: 0.5 } : {}}
+              disabled={!manualName}
+              style={!manualName ? { opacity: 0.5 } : {}}
             >
-              Add to log
+              {editingEntryId ? "Save changes" : "Add to log"}
             </button>
+            {editingEntryId && (
+              <button
+                className="w-full text-xs font-medium text-center mt-2"
+                style={{ color: "#948A78" }}
+                onClick={() => {
+                  setManualName(""); setManualCal(""); setManualProtein(""); setManualCarbs(""); setManualFat("");
+                  setManualTime(nowTimeStr());
+                  setEditingEntryId(null);
+                  setManualOpen(false);
+                }}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1084,11 +1281,43 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                         <div className="text-sm font-medium truncate">{entry.food.name}</div>
                       )}
                     </div>
-                    <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
-                      {entry.type === "food" && `${entry.grams}g · `}
-                      {entry.type === "manual" && "manual entry · "}
-                      {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
-                    </div>
+                    {entry.type === "manual" && entry.quantified === false ? (
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                          {entry.time && `${entry.time} · `}not yet quantified
+                        </span>
+                        <button
+                          className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+                          style={{ background: "#F5DCC9", color: "#9C5527" }}
+                          onClick={() => openEditManualEntry(entry)}
+                        >
+                          Add nutrition info
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                        {entry.time && `${entry.time} · `}
+                        {entry.type === "food" && `${entry.grams}g · `}
+                        {entry.type === "manual" && "manual entry · "}
+                        {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
+                        {entry.type === "manual" && (
+                          <button
+                            className="ml-2 underline decoration-dotted"
+                            onClick={() => openEditManualEntry(entry)}
+                          >
+                            edit
+                          </button>
+                        )}
+                        {entry.type === "food" && (
+                          <button
+                            className="ml-2 underline decoration-dotted"
+                            onClick={() => openEditFoodEntry(entry)}
+                          >
+                            edit
+                          </button>
+                        )}
+                      </div>
+                    )}
                     {entry.proteinOverride && (
                       <div className="text-[11px] italic mt-0.5" style={{ color: "#B5652F" }}>
                         Swapped: {entry.proteinOverride.grams}g {entry.proteinOverride.food}
@@ -1151,6 +1380,11 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
               {item.name}
             </span>
             {veggie && <span className="pe-badge-veggie text-[10px] font-semibold px-2 py-0.5 rounded-full">VEGGIE</span>}
+            {item.recoveryDay && (
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "#F5DCC9", color: "#9C5527" }}>
+                🔥 RECOVERY DAY
+              </span>
+            )}
           </div>
           {item.time && <span className="pe-badge-time text-[11px] px-2 py-0.5 rounded-full">{item.time}</span>}
         </div>
@@ -1181,11 +1415,24 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
               <>
                 <li>{item.proteinFood} — {round(macros.proteinPortion)}g</li>
                 <li>{item.carbFood} — {round(macros.carbPortion)}g</li>
-                {item.vegFood && <li>{item.vegText}</li>}
+                {(item.extras || []).map((e, i) => (
+                  <li key={i}>{e.food} — {round(e.grams)}g</li>
+                ))}
+                {item.vegText && (
+                  <li className="text-[12px]" style={{ color: "#948A78" }}>Also: {item.vegText}</li>
+                )}
               </>
             )}
             <li className="text-[12px]" style={{ color: "#948A78" }}>Plus: oil, salt, spices (see Store Cupboard)</li>
           </ul>
+          {macros.usesFixedProtein && macros.proteinTargetEquivalent && (
+            <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              <strong>Protein note:</strong> this recipe uses a normal serving of {item.proteinFood.toLowerCase()} ({round(macros.proteinPortion)}g),
+              giving {round(macros.proteinG)}g protein. To get your full protein target for this meal from {item.proteinFood.toLowerCase()} alone,
+              you'd need roughly {round(macros.proteinTargetEquivalent)}g — a genuinely unrealistic single portion. Pair this with an extra
+              protein source (a shake, some Greek yoghurt, a couple of eggs) to close the gap, or treat this as a lighter meal within your day's total.
+            </div>
+          )}
           {dietarySwaps(item, isFixed).length > 0 && (
             <>
               <div className="font-semibold text-xs uppercase tracking-wide mb-1.5" style={{ color: "#14403E" }}>Dietary swaps</div>
@@ -1254,6 +1501,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
   const [veggieOnly, setVeggieOnly] = useState(false);
   const [glutenFreeOnly, setGlutenFreeOnly] = useState(false);
   const [dairyFreeOnly, setDairyFreeOnly] = useState(false);
+  const [recoveryDayOnly, setRecoveryDayOnly] = useState(false);
   const [timeFilter, setTimeFilter] = useState("any"); // any | quick | standard | batch
   const [expandedKey, setExpandedKey] = useState(jumpTarget ? `${jumpTarget.section}::${jumpTarget.name}` : null);
   const targets = useMemo(() => computeTargets(profile), [profile]);
@@ -1283,7 +1531,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
     } else {
       if (x.item.proteinFood && x.item.proteinFood.toLowerCase().includes(q)) return true;
       if (x.item.carbFood && x.item.carbFood.toLowerCase().includes(q)) return true;
-      if (x.item.vegFood && x.item.vegFood.toLowerCase().includes(q)) return true;
+      if ((x.item.extras || []).some((e) => e.food.toLowerCase().includes(q))) return true;
       if (x.item.vegText && x.item.vegText.toLowerCase().includes(q)) return true;
     }
     return false;
@@ -1325,9 +1573,10 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
       .filter((x) => !veggieOnly || x.veggie)
       .filter((x) => !glutenFreeOnly || isGlutenFree(x.item, x.isFixed))
       .filter((x) => !dairyFreeOnly || isDairyFree(x.item, x.isFixed))
+      .filter((x) => !recoveryDayOnly || x.item.recoveryDay)
       .filter((x) => matchesTimeFilter(x.item, x.isFixed))
       .filter((x) => itemMatchesSearch(x, search));
-  }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, search, timeFilter]);
+  }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, recoveryDayOnly, search, timeFilter]);
 
   return (
     <div className="pe-fadein">
@@ -1368,6 +1617,13 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
             onClick={() => setDairyFreeOnly((v) => !v)}
           >
             Dairy-free
+          </button>
+          <button
+            className={`pe-chip px-3 py-2 text-xs font-semibold ${recoveryDayOnly ? "active" : ""}`}
+            onClick={() => setRecoveryDayOnly((v) => !v)}
+            title="Big, tasty, carb-and-protein-forward meals for after a hard session — calories aren't the focus here"
+          >
+            🔥 Recovery day
           </button>
         </div>
         <div className="flex gap-2 px-4 pb-3 overflow-x-auto pe-scroll">
@@ -1600,7 +1856,7 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
         const m = scaledMacros(v.item, target);
         addQty(v.item.proteinFood, v.item.proteinCategory, m.proteinPortion * v.qty);
         addQty(v.item.carbFood, v.item.carbCategory, m.carbPortion * v.qty);
-        if (v.item.vegFood) addQty(v.item.vegFood, v.item.vegCategory, v.item.vegGrams * v.qty);
+        (v.item.extras || []).forEach((e) => addQty(e.food, e.category, e.grams * v.qty));
       }
     });
 
@@ -1779,11 +2035,24 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
   const [profile, setProfileState] = useState(DEFAULT_PROFILE);
   const [cart, setCartState] = useState({});
   const [logsByDate, setLogsByDate] = useState({});
+  const [dayNotes, setDayNotes] = useState({});
   const [checkedItems, setCheckedItemsState] = useState({});
   const [jumpTarget, setJumpTarget] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
   const [hiddenItems, setHiddenItemsState] = useState({});
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | error
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   const viewRecipe = useCallback((section, name) => {
     setJumpTarget({ section, name });
@@ -1794,9 +2063,19 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
     (async () => {
       setSyncUserId(currentUserId);
       if (currentUserId) {
+        // If this device already has local data (has been used before), it may
+        // hold changes made while offline that were never successfully pushed —
+        // pulling first would silently overwrite and lose them. Push first to
+        // make sure anything local is safely persisted, then only pull if this
+        // is a genuinely fresh device with nothing local to protect yet.
+        const hasLocalData = await loadStored("pe_onboarded", false);
         setSyncStatus("syncing");
         try {
-          await pullUserData(currentUserId);
+          if (hasLocalData) {
+            await pushUserData(currentUserId);
+          } else {
+            await pullUserData(currentUserId);
+          }
           setSyncStatus("synced");
         } catch {
           setSyncStatus("error");
@@ -1806,12 +2085,14 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
       const p = await loadStored("pe_profile", DEFAULT_PROFILE);
       const c = await loadStored("pe_cart", {});
       const l = await loadStored("pe_logs_by_date", {});
+      const dn = await loadStored("pe_day_notes", {});
       const ch = await loadStored("pe_checked_items", {});
       const oh = await loadStored("pe_order_history", []);
       const hi = await loadStored("pe_hidden_items", {});
       setProfileState(p);
       setCartState(c);
       setLogsByDate(l);
+      setDayNotes(dn);
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
@@ -1847,6 +2128,14 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
     setLogsByDate((prev) => {
       const next = { ...prev, [date]: entries };
       saveStored("pe_logs_by_date", next);
+      return next;
+    });
+  }, []);
+
+  const updateDayNotes = useCallback((date, text) => {
+    setDayNotes((prev) => {
+      const next = { ...prev, [date]: text };
+      saveStored("pe_day_notes", next);
       return next;
     });
   }, []);
@@ -1959,15 +2248,22 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
       </div>
 
       <div style={{ paddingBottom: "76px" }}>
+        {!isOnline && (
+          <div className="px-5 py-2 text-xs font-medium text-center" style={{ background: "#FFF7ED", color: "#9C5527", borderBottom: "1px solid #F5DCC9" }}>
+            You're offline — everything you log is saved on this device and will sync automatically once you're back online.
+          </div>
+        )}
         {tab === "setup" && (
           <SetupScreen
             profile={profile}
             setProfile={setProfile}
             userEmail={userEmail}
             onSignOut={onSignOut}
+            syncStatus={syncStatus}
+            isOnline={isOnline}
           />
         )}
-        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} />}
+        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
