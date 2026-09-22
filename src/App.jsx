@@ -2,13 +2,40 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
 import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
-import { getMyProfile } from "./auth.js";
+import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail } from "./auth.js";
 import { pullUserData } from "./authSync.js";
 import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
 const STRUCTURES = ["Breakfast, Lunch & Dinner", "Lunch & Dinner", "Meals Only"];
+const STORE_CUPBOARD_ITEMS = [
+  "Olive oil", "Salt", "Black pepper", "Garlic (fresh)", "Onion (fresh, when not tracked as a main ingredient)",
+  "Paprika", "Ground cumin", "Dried oregano", "Dried basil", "Dried thyme", "Chilli flakes",
+  "Curry powder", "Garam masala", "Ground cinnamon", "Vanilla extract",
+  "Balsamic vinegar", "Red wine vinegar", "Soy sauce", "Worcestershire sauce",
+  "Dijon mustard", "Stock cubes or stock", "Plain flour or cornflour", "Baking powder",
+];
+
+function StoreCupboardList({ compact }) {
+  return (
+    <div>
+      {!compact && (
+        <p className="text-xs mb-2" style={{ color: "#948A78" }}>
+          Every recipe assumes you already have these basics at home — they're not added to your shopping list
+          since a bottle of oil or a jar of paprika lasts for dozens of meals, not one. Worth checking your
+          cupboard against this list once, then it's a one-off purchase.
+        </p>
+      )}
+      <ul className={`list-disc list-inside space-y-0.5 ${compact ? "text-[12px]" : "text-sm"}`} style={{ color: "#40473F" }}>
+        {STORE_CUPBOARD_ITEMS.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 const SECTION_ORDER = [
   "Breakfast", "Smoothies", "Granola", "Lunch", "Dinner",
   "Snacks", "Desserts & Sweet Treats", "Pre-Gym & Pre-Run", "Recovery Meals", "Recovery Smoothies",
@@ -125,7 +152,17 @@ function scaledMacros(item, target) {
   // portion would require — shown as advisory text only, never used in the totals.
   const proteinTargetEquivalent =
     usesFixedProtein && target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : null;
-  const carbPortion = target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
+
+  const usesFixedCarb = !!item.fixedCarbGrams;
+  const carbPortion = usesFixedCarb
+    ? item.fixedCarbGrams
+    : target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
+  // Same idea as the protein version, for a deliberately low-carb-density
+  // carb source (cauliflower rice, courgette noodles, a fruit-based bowl)
+  // that shouldn't be scaled to 100% of the target in one giant portion.
+  const carbTargetEquivalent =
+    usesFixedCarb && target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : null;
+
   const proteinG = (proteinPortion * item.proteinPer100) / 100;
   const carbG = (carbPortion * item.carbPer100) / 100;
   const extras = item.extras || [];
@@ -139,7 +176,10 @@ function scaledMacros(item, target) {
     (proteinPortion * (item.proteinFatPer100 || 0)) / 100 +
     (carbPortion * (item.carbFatPer100 || 0)) / 100 +
     extrasFat;
-  return { proteinPortion, carbPortion, proteinG, carbG, calories, fat, usesFixedProtein, proteinTargetEquivalent };
+  return {
+    proteinPortion, carbPortion, proteinG, carbG, calories, fat,
+    usesFixedProtein, proteinTargetEquivalent, usesFixedCarb, carbTargetEquivalent,
+  };
 }
 
 function fixedMacros(item) {
@@ -186,7 +226,312 @@ function ContourSVG() {
   );
 }
 
-function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, isOnline }) {
+function CookingGuideScreen() {
+  const Section = ({ title, children }) => (
+    <div className="pe-card p-4 mb-3">
+      <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>{title}</div>
+      <div className="text-sm space-y-2" style={{ color: "#40473F" }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Cooking Guide</h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        Meal prep strategy, everyday technique, and the small habits that separate an okay plate from a genuinely
+        good one — none of it requires fancy equipment or professional training.
+      </p>
+
+      <Section title="📦 Meal prep — set yourself up for the week">
+        <p><strong>Batch the base, not the whole dish.</strong> Cook a big tray of rice, a batch of roasted
+        vegetables, and a couple of proteins on a Sunday, then mix and match through the week rather than making
+        five identical meals — you'll actually want to eat it on day four.</p>
+        <p><strong>Undercook slightly if you're reheating.</strong> Vegetables and pasta both keep cooking a
+        little in the fridge and again when reheated — pull them off the heat just before they're perfectly done.</p>
+        <p><strong>Cool food fully before sealing it in the fridge.</strong> Sealing something hot traps steam,
+        which means soggy vegetables and a shorter shelf life. Ten minutes uncovered on the counter first makes
+        a real difference.</p>
+        <p><strong>Freeze in portions, not one big block.</strong> A single large frozen block of chilli or
+        curry takes forever to defrost evenly and often overcooks at the edges before the middle's even thawed.
+        Flat bags or individual containers freeze faster and thaw faster too.</p>
+        <p><strong>Dress salads and add crunchy toppings just before eating</strong>, not when you prep — nuts,
+        seeds and anything meant to be crisp will go soft and soggy sitting in the fridge for days.</p>
+      </Section>
+
+      <Section title="🔥 Getting a better sear or golden finish">
+        <p><strong>Pat protein dry before it hits the pan.</strong> Surface moisture steams instead of browning
+        — a couple of minutes with kitchen paper before cooking chicken, steak, or fish makes a genuinely visible
+        difference to colour and crust.</p>
+        <p><strong>Don't move it too soon.</strong> Meat, fish and halloumi all release themselves from the pan
+        naturally once a proper crust has formed. If it's sticking and tearing when you try to flip it, it's
+        not ready yet — give it another minute.</p>
+        <p><strong>Don't overcrowd the pan.</strong> Too much in the pan at once drops the temperature and the
+        food steams rather than sears. Cook in batches if you need to — it's faster in total than one soggy batch.</p>
+        <p><strong>Let meat rest after cooking</strong> — a few minutes for a steak or chicken breast, longer for
+        a bigger cut. Cutting straight in lets all the juice run out onto the board instead of staying in the meat.</p>
+      </Section>
+
+      <Section title="🧂 Seasoning and flavour">
+        <p><strong>Season in layers, not just at the end.</strong> A pinch of salt on the onions as they cook, a
+        bit more when you add the next ingredient, then a final taste-and-adjust at the end — builds far more
+        flavour than one big pinch right before serving.</p>
+        <p><strong>Taste as you go</strong>, genuinely the single most underused habit in home cooking. You can't
+        fix a bland dish once it's on the plate, but you can fix it two minutes before.</p>
+        <p><strong>Acid at the end wakes a dish up.</strong> A squeeze of lemon or a dash of vinegar right before
+        serving, especially on anything rich or a bit flat-tasting, does more than another pinch of salt would.</p>
+        <p><strong>Toast whole or ground spices briefly in the dry pan</strong> before adding wet ingredients —
+        30 seconds over medium heat brings out a noticeably deeper flavour than adding them straight into liquid.</p>
+      </Section>
+
+      <Section title="🍚 Rice, pasta & grains">
+        <p><strong>Salt the water properly</strong> — it should taste like the sea. This is the only chance
+        pasta or rice has to be seasoned from the inside rather than just on the surface.</p>
+        <p><strong>Rinse rice before cooking</strong> (not pasta) — it removes surface starch and gives a
+        fluffier, less clumpy result, especially for basmati.</p>
+        <p><strong>Save a splash of pasta water</strong> before draining — the starchy water helps any sauce
+        cling to the pasta properly instead of pooling at the bottom of the bowl.</p>
+      </Section>
+
+      <Section title="🥦 Vegetables">
+        <p><strong>Roast at a genuinely high heat</strong> (200°C or above) and don't overcrowd the tray — too
+        many vegetables piled together steams them instead of roasting, and you lose the caramelised edges that
+        actually taste good.</p>
+        <p><strong>Cut everything on the tray to a similar size</strong> so it all finishes cooking at the same
+        time, rather than some pieces burning while others are still hard.</p>
+        <p><strong>Don't skip drying vegetables after washing</strong> if you're roasting or stir-frying them —
+        the same steaming problem as with meat.</p>
+      </Section>
+
+      <Section title="🍳 Eggs">
+        <p><strong>Low and slow for scrambled eggs</strong> — a gentle heat and patience gets a genuinely
+        creamier result than blasting them on high, which just makes them rubbery fast.</p>
+        <p><strong>Room-temperature eggs poach and boil more evenly</strong> than eggs straight from the fridge.</p>
+      </Section>
+
+      <Section title="🍲 Sauces & stews">
+        <p><strong>Deglaze the pan.</strong> After browning meat, add a splash of stock, wine, or even water to
+        the same pan and scrape up the browned bits stuck to the bottom — that's genuinely concentrated flavour,
+        not something to wash down the drain.</p>
+        <p><strong>A longer, gentler simmer beats a rushed boil</strong> for almost any stew or curry — flavours
+        have time to actually combine rather than just cooking through.</p>
+        <p><strong>Thin a sauce with pasta water, stock, or a splash of milk</strong> rather than plain water if
+        you need to loosen it — plain water dilutes flavour along with the texture.</p>
+      </Section>
+
+      <Section title="🔪 A few genuinely useful habits">
+        <p><strong>Read the whole recipe before you start cooking</strong>, not just the ingredient list —
+        nothing derails a meal faster than realising step 4 needed something marinating an hour ago.</p>
+        <p><strong>Prep everything before the pan gets hot</strong> (chefs call this mise en place) — chopping
+        an onion while something else is already burning is how most kitchen mistakes happen.</p>
+        <p><strong>A sharp knife is safer than a dull one</strong> — it requires less force and is far less
+        likely to slip.</p>
+        <p><strong>Keep a kitchen towel over your shoulder, not a fresh one for every wipe</strong> — small
+        thing, but it's exactly how professional kitchens stay fast and organised without constant clean-up stops.</p>
+      </Section>
+    </div>
+  );
+}
+
+function HelpGuideScreen({ onGetStarted, isFirstRun }) {
+  const Section = ({ title, children }) => (
+    <div className="pe-card p-4 mb-3">
+      <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>{title}</div>
+      <div className="text-sm space-y-2" style={{ color: "#40473F" }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>
+        {isFirstRun ? "Welcome — here's how this works" : "Help & Guide"}
+      </h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        A quick tour of every part of the app, and what to do if something needs changing.
+      </p>
+
+      <Section title="⚙ Setup — start here">
+        <p>Your bodyweight, goal (Fat Loss / Maintenance / Muscle Gain) and meal structure drive every target in
+        the app. Change your bodyweight here whenever it changes — everything recalculates automatically.</p>
+        <p><strong>Calorie adjustment</strong> lets you nudge your daily calories up or down (e.g. +300 on a
+        heavier training day) without changing your protein target.</p>
+        <p><strong>Meal distribution</strong> — by default your protein and carbs split evenly across your meals.
+        Drag the sliders if you want a bigger breakfast and a lighter dinner, say, or add snacks that each claim
+        a % of your day.</p>
+      </Section>
+
+      <Section title="🍽 Recipes — browsing and filtering">
+        <p>Search by recipe name, or by an ingredient (e.g. "chicken" finds every recipe using chicken as the
+        main protein). The dropdown under the search box — "Tired and don't know what to cook?" — lets you pick
+        an ingredient and see everything that uses it.</p>
+        <p><strong>Filters:</strong> Veggie only, Gluten-free, Dairy-free, and 🔥 Recovery day (bigger, tastier,
+        less calorie-conscious meals for after a big session) can be combined. A "✕ Reset all" chip appears once
+        any filter or search is active.</p>
+        <p>Tap a recipe to expand it — you'll see the exact quantity of every tracked ingredient, a "Dietary
+        swaps" section if it's easy to make gluten- or dairy-free, and the full method. "Plus: oil, salt, spices —
+        see Store Cupboard" is tappable and shows the basics every recipe assumes you already have.</p>
+      </Section>
+
+      <Section title="💪 Gym — before and after training">
+        <p>Toggle between "Before training" (quick, easy-to-digest snacks) and "After training" (recovery meals
+        and smoothies, scaled to a separate post-workout target). Adding something here logs it straight to
+        today's Daily Log.</p>
+      </Section>
+
+      <Section title="🛒 Order & Shopping">
+        <p>Add recipes to your order from the Recipes or Gym tabs, then head to Shopping for the combined
+        ingredient list, grouped and totalled. Tick items off as you shop — "Clear ticked" removes just what
+        you've bought (handy for a second trip), "Clear all" archives the whole order to Past Orders and starts
+        fresh.</p>
+        <p>Past Orders can be reordered in one tap, or viewed without changing your current cart.</p>
+      </Section>
+
+      <Section title="📋 Daily Log — tracking what you actually eat">
+        <p>Three ways to log something: <strong>Add a meal</strong> (pick a recipe, adjust servings, even swap
+        the protein source if you used something different), <strong>Add a food</strong> (search the ingredient
+        database and enter grams), or <strong>Log manually</strong> for anything else — a takeaway, a meal
+        replacement.</p>
+        <p>Logging manually doesn't require the numbers up front — leave calories blank if you just want to
+        record <em>what</em> and <em>when</em> you ate something, and add the nutrition info later by tapping
+        "Add nutrition info" on that entry.</p>
+        <p>The <strong>"How are you feeling today?"</strong> notes box is there for tracking bloating, energy,
+        digestion, or mood alongside what you ate — useful for spotting patterns over time.</p>
+        <p>The <strong>Trends</strong> chart shows your last week or month at a glance, with workout-related
+        nutrition shown in a separate colour from everyday meals.</p>
+        <p>Tap <strong>⬇ Export</strong> at the top to download your entire log history (every day, every entry,
+        every note) as a spreadsheet.</p>
+      </Section>
+
+      <Section title="🔄 Syncing & working offline">
+        <p>Your data saves to this device instantly and syncs to your account automatically — log in on another
+        device and it'll be there. If you're offline, everything still saves locally and syncs the moment you're
+        back online; check the sync status in Setup → Account if you want to confirm.</p>
+      </Section>
+
+      <Section title="🔥 What 'Recovery Day' actually means">
+        <p>Recovery Day recipes (burgers, gyros, real desserts with real sugar and cream) are tagged for days
+        after a big session where you want to genuinely enjoy your food rather than watch every gram. They still
+        include a proper veg or salad base — they're just not built around minimising calories the way the rest
+        of the plan is.</p>
+      </Section>
+
+      <div
+        className="rounded-lg p-4 mt-2"
+        style={{ background: "#FFF7ED", border: "1px solid #F5DCC9" }}
+      >
+        <div className="text-sm font-semibold mb-1.5" style={{ color: "#9C5527" }}>
+          ⚠️ A note on allergens and ingredient accuracy
+        </div>
+        <p className="text-xs mb-2" style={{ color: "#9C5527" }}>
+          This app is <strong>not</strong> built as an allergen-management tool. The Gluten-free and Dairy-free
+          filters are a best-effort guide based on each recipe's main tracked ingredients only — they are{" "}
+          <strong>not verified safe for coeliac disease or a diagnosed food allergy</strong>, and a method step
+          can mention an ingredient (a coating, a dash of sauce, a garnish) that isn't reflected in the filter at
+          all. There is currently no filtering for nuts, shellfish, eggs, or any other allergen.
+        </p>
+        <p className="text-xs" style={{ color: "#9C5527" }}>
+          Nutrition figures (calories, protein, carbs, fat) are calculated from standard ingredient data and are
+          a close estimate, not a laboratory measurement. If you or a client has any allergy, intolerance, or
+          medical dietary requirement, <strong>always independently check every ingredient and full method of
+          any recipe before eating it</strong> — don't rely on this app's filters or figures alone.
+        </p>
+      </div>
+
+      {onGetStarted && (
+        <button
+          className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm mt-4"
+          onClick={onGetStarted}
+        >
+          {isFirstRun ? "Get started →" : "Back"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, isOnline, onOpenGuide, onOpenCookingGuide, currentUserId, coachId, onProfileRefresh }) {
+  const [coachEmailInput, setCoachEmailInput] = useState("");
+  const [coachLinkStatus, setCoachLinkStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [coachLinkError, setCoachLinkError] = useState("");
+
+  const handleLinkCoach = async () => {
+    if (!coachEmailInput.trim()) return;
+    setCoachLinkStatus("saving");
+    setCoachLinkError("");
+    try {
+      await linkCoach(currentUserId, coachEmailInput);
+      setCoachLinkStatus("success");
+      setCoachEmailInput("");
+      if (onProfileRefresh) await onProfileRefresh();
+    } catch (e) {
+      setCoachLinkStatus("error");
+      setCoachLinkError(e.message || "Couldn't link that coach — try again.");
+    }
+  };
+
+  const handleUnlinkCoach = async () => {
+    setCoachLinkStatus("saving");
+    try {
+      await unlinkCoach(currentUserId);
+      setCoachLinkStatus("");
+      if (onProfileRefresh) await onProfileRefresh();
+    } catch (e) {
+      setCoachLinkStatus("error");
+      setCoachLinkError(e.message || "Couldn't remove your coach — try again.");
+    }
+  };
+
+  const [showSecurity, setShowSecurity] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordStatus, setPasswordStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [passwordError, setPasswordError] = useState("");
+
+  const handleChangePassword = async () => {
+    if (newPassword.length < 8) {
+      setPasswordStatus("error");
+      setPasswordError("Password needs to be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordStatus("error");
+      setPasswordError("Those two passwords don't match.");
+      return;
+    }
+    setPasswordStatus("saving");
+    setPasswordError("");
+    try {
+      await changePassword(newPassword);
+      setPasswordStatus("success");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (e) {
+      setPasswordStatus("error");
+      setPasswordError(e.message || "Couldn't change your password — try again.");
+    }
+  };
+
+  const [newEmail, setNewEmail] = useState("");
+  const [emailStatus, setEmailStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [emailError, setEmailError] = useState("");
+
+  const handleChangeEmail = async () => {
+    if (!newEmail.trim() || !newEmail.includes("@")) {
+      setEmailStatus("error");
+      setEmailError("Enter a valid email address.");
+      return;
+    }
+    setEmailStatus("saving");
+    setEmailError("");
+    try {
+      await changeEmail(newEmail);
+      setEmailStatus("success");
+      setNewEmail("");
+    } catch (e) {
+      setEmailStatus("error");
+      setEmailError(e.message || "Couldn't change your email — try again.");
+    }
+  };
+
   return (
     <div className="pe-fadein max-w-md mx-auto px-5 py-6">
       <h2 className="pe-display text-2xl font-semibold mb-1" style={{ color: "#14403E" }}>Your details</h2>
@@ -243,6 +588,36 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
 
       <MealDistribution profile={profile} setProfile={setProfile} />
 
+      {onOpenGuide && (
+        <button
+          className="pe-card w-full p-4 mb-3 text-left flex items-center justify-between"
+          onClick={onOpenGuide}
+        >
+          <div>
+            <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>📖 Help & Guide</div>
+            <div className="text-xs mt-0.5" style={{ color: "#948A78" }}>
+              How to use every part of the app, plus a note on allergens and ingredient accuracy
+            </div>
+          </div>
+          <span style={{ color: "#948A78" }}>→</span>
+        </button>
+      )}
+
+      {onOpenCookingGuide && (
+        <button
+          className="pe-card w-full p-4 mb-5 text-left flex items-center justify-between"
+          onClick={onOpenCookingGuide}
+        >
+          <div>
+            <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>🔪 Cooking Guide</div>
+            <div className="text-xs mt-0.5" style={{ color: "#948A78" }}>
+              Meal prep strategy and everyday technique tips — searing, seasoning, roasting, and more
+            </div>
+          </div>
+          <span style={{ color: "#948A78" }}>→</span>
+        </button>
+      )}
+
       <div className="pe-card p-4 mb-5">
         <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>Account</div>
         <p className="text-xs mb-3" style={{ color: "#948A78" }}>
@@ -269,6 +644,125 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
         <button className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold" onClick={onSignOut}>
           Sign out
         </button>
+      </div>
+
+      <div className="pe-card p-4 mb-5">
+        <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>Coach</div>
+        {coachId ? (
+          <>
+            <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+              You're currently linked to a coach — they can see your profile, order, and logs.
+            </p>
+            <button
+              className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold"
+              onClick={handleUnlinkCoach}
+              disabled={coachLinkStatus === "saving"}
+            >
+              {coachLinkStatus === "saving" ? "Removing…" : "Remove my coach"}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+              Not linked to a coach yet. If you didn't add one when you signed up — or want to switch — enter
+              their email below at any time.
+            </p>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="email"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                placeholder="Your coach's email"
+                value={coachEmailInput}
+                onChange={(e) => setCoachEmailInput(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold"
+                onClick={handleLinkCoach}
+                disabled={!coachEmailInput.trim() || coachLinkStatus === "saving"}
+                style={!coachEmailInput.trim() || coachLinkStatus === "saving" ? { opacity: 0.5 } : {}}
+              >
+                {coachLinkStatus === "saving" ? "Linking…" : "Link"}
+              </button>
+            </div>
+          </>
+        )}
+        {coachLinkStatus === "error" && (
+          <p className="text-xs mt-1" style={{ color: "#B5652F" }}>{coachLinkError}</p>
+        )}
+        {coachLinkStatus === "success" && (
+          <p className="text-xs mt-1" style={{ color: "#4F6B41" }}>Linked! Your coach can now see your progress.</p>
+        )}
+      </div>
+
+      <div className="pe-card p-4 mb-5">
+        <button className="flex items-center justify-between w-full" onClick={() => setShowSecurity((v) => !v)}>
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Password & Email</div>
+          <span className="text-xs" style={{ color: "#948A78" }}>{showSecurity ? "Hide ▲" : "Show ▼"}</span>
+        </button>
+
+        {showSecurity && (
+          <div className="pe-fadein mt-4">
+            <div className="mb-5">
+              <div className="text-xs font-semibold mb-1.5" style={{ color: "#40473F" }}>Change password</div>
+              <input
+                type="password"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="New password (min. 8 characters)"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+              <input
+                type="password"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="Confirm new password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold"
+                onClick={handleChangePassword}
+                disabled={passwordStatus === "saving"}
+              >
+                {passwordStatus === "saving" ? "Saving…" : "Update password"}
+              </button>
+              {passwordStatus === "error" && (
+                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{passwordError}</p>
+              )}
+              {passwordStatus === "success" && (
+                <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>Password updated.</p>
+              )}
+            </div>
+
+            <div className="pe-divider pt-4">
+              <div className="text-xs font-semibold mb-1.5" style={{ color: "#40473F" }}>Change email</div>
+              <p className="text-[11px] mb-2" style={{ color: "#948A78" }}>
+                You'll get a confirmation link at the new address — the change only takes effect once you click it.
+              </p>
+              <input
+                type="email"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="New email address"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold"
+                onClick={handleChangeEmail}
+                disabled={emailStatus === "saving"}
+              >
+                {emailStatus === "saving" ? "Saving…" : "Send confirmation link"}
+              </button>
+              {emailStatus === "error" && (
+                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{emailError}</p>
+              )}
+              {emailStatus === "success" && (
+                <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>
+                  Check your new inbox for a confirmation link to finish the change.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <TargetsSummary profile={profile} />
@@ -438,7 +932,9 @@ function TargetsSummary({ profile }) {
 const WORKOUT_LOG_SECTIONS = new Set(["Recovery Meals", "Recovery Smoothies", "Pre-Gym & Pre-Run"]);
 
 function dateStr(d) {
-  return d.toISOString().slice(0, 10);
+  // Same local-date fix as todayStr() — must match it exactly, otherwise the
+  // chart's day boundaries and the log's actual day boundaries drift apart.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function splitDayCalories(entries) {
@@ -557,7 +1053,12 @@ function ProgressBar({ label, consumed, target, unit }) {
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  // Deliberately using local date parts, not .toISOString() (which is UTC) —
+  // using UTC here would file anything logged in the first hour or so after
+  // local midnight under the previous day, for anyone not exactly on GMT
+  // (this includes the UK itself during British Summer Time).
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function nowTimeStr() {
@@ -772,6 +1273,13 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
               This uses a normal serving of {pendingItem.proteinFood.toLowerCase()} ({round(baseMacros.proteinPortion)}g) rather than scaling it
               to your full protein target (which would need ~{round(baseMacros.proteinTargetEquivalent)}g — unrealistic as a single portion).
               Consider pairing with an extra protein source to close the gap.
+            </div>
+          )}
+          {baseMacros && baseMacros.usesFixedCarb && baseMacros.carbTargetEquivalent && (
+            <div className="rounded-lg p-2.5 mb-3 text-[11px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              This uses a normal serving of {pendingItem.carbFood.toLowerCase()} ({round(baseMacros.carbPortion)}g) — a deliberately
+              lower-carb ingredient, so it won't cover your full carb target on its own (~{round(baseMacros.carbTargetEquivalent)}g would be
+              needed). Add carbs elsewhere in the day if you need them.
             </div>
           )}
 
@@ -1366,6 +1874,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
 
 function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, onBulkAdd, expanded, onToggleExpand, sectionBadge }) {
+  const [showCupboard, setShowCupboard] = useState(false);
   return (
     <div className="pe-card p-4 mb-3">
       <div className="flex items-start justify-between gap-3">
@@ -1423,14 +1932,35 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
                 )}
               </>
             )}
-            <li className="text-[12px]" style={{ color: "#948A78" }}>Plus: oil, salt, spices (see Store Cupboard)</li>
+            <li className="text-[12px]" style={{ color: "#948A78" }}>
+              Plus: oil, salt, spices —{" "}
+              <button
+                className="underline decoration-dotted"
+                onClick={(e) => { e.stopPropagation(); setShowCupboard((v) => !v); }}
+              >
+                see Store Cupboard
+              </button>
+            </li>
           </ul>
+          {showCupboard && (
+            <div className="rounded-lg p-3 mb-3" style={{ background: "#F5F4EE", border: "1px solid #E4E1D6" }}>
+              <StoreCupboardList compact />
+            </div>
+          )}
           {macros.usesFixedProtein && macros.proteinTargetEquivalent && (
             <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
               <strong>Protein note:</strong> this recipe uses a normal serving of {item.proteinFood.toLowerCase()} ({round(macros.proteinPortion)}g),
               giving {round(macros.proteinG)}g protein. To get your full protein target for this meal from {item.proteinFood.toLowerCase()} alone,
               you'd need roughly {round(macros.proteinTargetEquivalent)}g — a genuinely unrealistic single portion. Pair this with an extra
               protein source (a shake, some Greek yoghurt, a couple of eggs) to close the gap, or treat this as a lighter meal within your day's total.
+            </div>
+          )}
+          {macros.usesFixedCarb && macros.carbTargetEquivalent && (
+            <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              <strong>Carb note:</strong> this recipe uses a normal serving of {item.carbFood.toLowerCase()} ({round(macros.carbPortion)}g),
+              giving {round(macros.carbG)}g carbs. {item.carbFood} is deliberately low in carbs, so hitting your full carb target from it
+              alone would need roughly {round(macros.carbTargetEquivalent)}g — an unrealistic single portion, and it would also defeat the
+              point of a lower-carb dish. If you need the rest of your carbs today, add them elsewhere in the day rather than to this meal.
             </div>
           )}
           {dietarySwaps(item, isFixed).length > 0 && (
@@ -1625,6 +2155,22 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
           >
             🔥 Recovery day
           </button>
+          {(veggieOnly || glutenFreeOnly || dairyFreeOnly || recoveryDayOnly || timeFilter !== "any" || search) && (
+            <button
+              className="pe-chip px-3 py-2 text-xs font-semibold"
+              style={{ background: "#F5DCC9", color: "#9C5527" }}
+              onClick={() => {
+                setVeggieOnly(false);
+                setGlutenFreeOnly(false);
+                setDairyFreeOnly(false);
+                setRecoveryDayOnly(false);
+                setTimeFilter("any");
+                setSearch("");
+              }}
+            >
+              ✕ Reset all
+            </button>
+          )}
         </div>
         <div className="flex gap-2 px-4 pb-3 overflow-x-auto pe-scroll">
           {[
@@ -1874,12 +2420,26 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
   const allNames = Object.values(grouped).flat().map((i) => i.name);
   const checkedCount = allNames.filter((n) => checkedItems[n]).length;
 
+  const [showCupboard, setShowCupboard] = useState(false);
+
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
       <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Shopping list</h2>
       <p className="text-xs mb-4" style={{ color: "#948A78" }}>
         Totals from everything in your order. Pantry basics (oil, salt, spices, sauces) aren't included — stock those separately.
       </p>
+
+      <div className="pe-card p-4 mb-4">
+        <button className="flex items-center justify-between w-full" onClick={() => setShowCupboard((v) => !v)}>
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Store Cupboard Essentials</div>
+          <span className="text-xs" style={{ color: "#948A78" }}>{showCupboard ? "Hide ▲" : "Show ▼"}</span>
+        </button>
+        {showCupboard && (
+          <div className="pe-fadein mt-3">
+            <StoreCupboardList />
+          </div>
+        )}
+      </div>
 
       {!hasAny && (
         <p className="text-sm text-center py-10" style={{ color: "#948A78" }}>Add some meals to your order first.</p>
@@ -2029,8 +2589,9 @@ const TABS = [
   { key: "setup", label: "Setup", icon: "⚙" },
 ];
 
-function AthleteApp({ currentUserId, userEmail, onSignOut }) {
+function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRefresh }) {
   const [ready, setReady] = useState(false);
+  const [hasOnboarded, setHasOnboarded] = useState(true); // default true so returning users never briefly see the first-run framing
   const [tab, setTab] = useState("setup");
   const [profile, setProfileState] = useState(DEFAULT_PROFILE);
   const [cart, setCartState] = useState({});
@@ -2096,7 +2657,8 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
-      setTab(onboarded ? "log" : "setup");
+      setTab(onboarded ? "log" : "guide");
+      setHasOnboarded(onboarded);
       setReady(true);
     })();
   }, [currentUserId]);
@@ -2253,6 +2815,13 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
             You're offline — everything you log is saved on this device and will sync automatically once you're back online.
           </div>
         )}
+        {tab === "guide" && (
+          <HelpGuideScreen
+            isFirstRun={!hasOnboarded}
+            onGetStarted={() => setTab("setup")}
+          />
+        )}
+        {tab === "cooking" && <CookingGuideScreen />}
         {tab === "setup" && (
           <SetupScreen
             profile={profile}
@@ -2261,6 +2830,11 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
             onSignOut={onSignOut}
             syncStatus={syncStatus}
             isOnline={isOnline}
+            onOpenGuide={() => setTab("guide")}
+            onOpenCookingGuide={() => setTab("cooking")}
+            currentUserId={currentUserId}
+            coachId={coachId}
+            onProfileRefresh={onProfileRefresh}
           />
         )}
         {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} />}
@@ -2424,6 +2998,8 @@ export default function Root() {
       currentUserId={session.user.id}
       userEmail={session.user.email}
       onSignOut={handleSignOut}
+      coachId={profile.coach_id}
+      onProfileRefresh={loadSessionAndProfile}
     />
   );
 }

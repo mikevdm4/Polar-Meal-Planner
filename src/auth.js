@@ -87,3 +87,41 @@ export async function rejectCoach(coachId) {
   const { error } = await supabase.from("profiles").delete().eq("id", coachId);
   if (error) throw error;
 }
+
+// Lets an athlete link (or switch) their coach at any point after sign-up —
+// not just as a one-time choice made during registration.
+export async function linkCoach(athleteUserId, coachEmail) {
+  const { data: coachProfile, error: lookupError } = await supabase
+    .from("profiles")
+    .select("id, approved")
+    .eq("email", coachEmail.trim().toLowerCase())
+    .eq("role", "coach")
+    .maybeSingle();
+  if (lookupError) throw lookupError;
+  if (!coachProfile) {
+    throw new Error("No coach account found with that email. Check it's spelled exactly as they gave it to you.");
+  }
+  if (!coachProfile.approved) {
+    throw new Error("That coach account hasn't been approved yet, so linking to it isn't possible just yet.");
+  }
+  const { error: updateError } = await supabase
+    .from("profiles")
+    .update({ coach_id: coachProfile.id })
+    .eq("id", athleteUserId);
+  if (updateError) throw updateError;
+}
+
+export async function unlinkCoach(athleteUserId) {
+  const { error } = await supabase.from("profiles").update({ coach_id: null }).eq("id", athleteUserId);
+  if (error) throw error;
+}
+
+export async function changePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
+export async function changeEmail(newEmail) {
+  const { error } = await supabase.auth.updateUser({ email: newEmail.trim().toLowerCase() });
+  if (error) throw error;
+}
