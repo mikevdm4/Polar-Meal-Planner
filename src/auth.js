@@ -125,3 +125,76 @@ export async function changeEmail(newEmail) {
   const { error } = await supabase.auth.updateUser({ email: newEmail.trim().toLowerCase() });
   if (error) throw error;
 }
+
+// A coach's suggested meal picks for one athlete's week. `plan` is a JSON
+// object shaped like { "2026-06-08": { lunch: {name, section}, dinner: {...} }, ... }
+// (dates as keys rather than "Mon"/"Tue" so it's unambiguous which actual
+// day each pick falls on).
+export async function saveWeekPlan({ athleteId, coachId, weekStart, plan, coachNote }) {
+  const { error } = await supabase
+    .from("coach_meal_plans")
+    .upsert(
+      { athlete_id: athleteId, coach_id: coachId, week_start: weekStart, plan, coach_note: coachNote || null, updated_at: new Date().toISOString() },
+      { onConflict: "athlete_id,week_start" }
+    );
+  if (error) throw error;
+}
+
+export async function getAthleteWeekPlan(athleteId, weekStart) {
+  const { data, error } = await supabase
+    .from("coach_meal_plans")
+    .select("*")
+    .eq("athlete_id", athleteId)
+    .eq("week_start", weekStart)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// The athlete's own view of whatever their coach has planned for the given week.
+export async function getMyWeekPlan(weekStart) {
+  const { data: session } = await supabase.auth.getUser();
+  const userId = session?.user?.id;
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from("coach_meal_plans")
+    .select("*")
+    .eq("athlete_id", userId)
+    .eq("week_start", weekStart)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function saveFeedback({ athleteId, coachId, entryDate, message }) {
+  const { error } = await supabase
+    .from("coach_feedback")
+    .upsert(
+      { athlete_id: athleteId, coach_id: coachId, entry_date: entryDate, message, updated_at: new Date().toISOString() },
+      { onConflict: "athlete_id,entry_date" }
+    );
+  if (error) throw error;
+}
+
+export async function deleteFeedback(athleteId, entryDate) {
+  const { error } = await supabase.from("coach_feedback").delete().eq("athlete_id", athleteId).eq("entry_date", entryDate);
+  if (error) throw error;
+}
+
+export async function getAthleteFeedback(athleteId) {
+  const { data, error } = await supabase.from("coach_feedback").select("*").eq("athlete_id", athleteId);
+  if (error) throw error;
+  return data || [];
+}
+
+// The athlete's own view of feedback their coach has left, keyed by date for easy lookup.
+export async function getMyFeedback() {
+  const { data: session } = await supabase.auth.getUser();
+  const userId = session?.user?.id;
+  if (!userId) return {};
+  const { data, error } = await supabase.from("coach_feedback").select("*").eq("athlete_id", userId);
+  if (error) throw error;
+  const byDate = {};
+  (data || []).forEach((row) => { byDate[row.entry_date] = row.message; });
+  return byDate;
+}

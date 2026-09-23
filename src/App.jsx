@@ -2,13 +2,13 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
 import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
-import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail } from "./auth.js";
+import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail, getMyWeekPlan, getMyFeedback } from "./auth.js";
 import { pullUserData } from "./authSync.js";
 import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
+import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros } from "./calculations.js";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
-const STRUCTURES = ["Breakfast, Lunch & Dinner", "Lunch & Dinner", "Meals Only"];
 const STORE_CUPBOARD_ITEMS = [
   "Olive oil", "Salt", "Black pepper", "Garlic (fresh)", "Onion (fresh, when not tracked as a main ingredient)",
   "Paprika", "Ground cumin", "Dried oregano", "Dried basil", "Dried thyme", "Chilli flakes",
@@ -74,10 +74,6 @@ const INGREDIENT_GROUPS = (() => {
   };
 })();
 
-const SECTION_MEAL_TYPE = {
-  Breakfast: "Breakfast", Lunch: "Lunch", Dinner: "Dinner", "Recovery Meals": "Recovery",
-};
-
 const DEFAULT_PROFILE = {
   bodyweight: 70,
   goal: "Fat Loss",
@@ -88,99 +84,6 @@ const DEFAULT_PROFILE = {
   mealPercents: null, // null = use evidence-based default (even split) for current structure
 };
 
-function defaultMealPercents(structure) {
-  if (structure === STRUCTURES[0]) return { Breakfast: 33, Lunch: 33, Dinner: 34 };
-  if (structure === STRUCTURES[1]) return { Lunch: 50, Dinner: 50 };
-  return {};
-}
-
-function activeMealKeys(structure) {
-  if (structure === STRUCTURES[0]) return ["Breakfast", "Lunch", "Dinner"];
-  if (structure === STRUCTURES[1]) return ["Lunch", "Dinner"];
-  return [];
-}
-
-function computeTargets(profile) {
-  const bw = Number(profile.bodyweight) || 0;
-  const proteinPerKg = profile.goal === "Fat Loss" ? 2.2 : profile.goal === "Maintenance" ? 1.8 : 2.0;
-  const kcalPerKg = profile.goal === "Fat Loss" ? 26 : profile.goal === "Maintenance" ? 31 : 36;
-  const calories = bw * kcalPerKg + (Number(profile.adjustment) || 0);
-  const protein = bw * proteinPerKg;
-  const fat = (calories * 0.35) / 9;
-  const carbs = (calories - protein * 4 - fat * 9) / 4;
-
-  const snackCount = Number(profile.snackCount) || 0;
-  const snackPct = Number(profile.snackPct) || 0;
-  const snackPoolPct = snackCount * snackPct;
-  const mealPoolPct = Math.max(0, 100 - snackPoolPct);
-
-  const keys = activeMealKeys(profile.structure);
-  const mealPercents = profile.mealPercents || defaultMealPercents(profile.structure);
-
-  const perMealByType = {};
-  keys.forEach((k) => {
-    const pct = mealPercents[k] != null ? mealPercents[k] : 100 / keys.length;
-    perMealByType[k] = {
-      protein: (protein * pct) / 100,
-      carbs: (carbs * pct) / 100,
-      pct,
-    };
-  });
-
-  // Legacy shared value (used only by "Meals Only" fallback and the summary card)
-  const mealCount = keys.length || 1;
-  const perMeal = { protein: protein / mealCount, carbs: carbs / mealCount };
-
-  const snackBudget = { protein: (protein * snackPct) / 100, carbs: (carbs * snackPct) / 100, calories: (calories * snackPct) / 100 };
-  const recovery = { protein: bw * 0.35, carbs: bw * 1.1 };
-  return { calories, protein, fat, carbs, perMeal, perMealByType, mealPoolPct, snackPoolPct, snackBudget, recovery, mealCount };
-}
-
-function mealTarget(sectionName, targets) {
-  if (sectionName === "Recovery Meals") return targets.recovery;
-  if (targets.perMealByType && targets.perMealByType[sectionName]) return targets.perMealByType[sectionName];
-  if (SECTION_MEAL_TYPE[sectionName]) return targets.perMeal; // Meals Only fallback
-  return null; // fixed-portion sections don't use bodyweight targets
-}
-
-function scaledMacros(item, target) {
-  const usesFixedProtein = !!item.fixedProteinGrams;
-  const proteinPortion = usesFixedProtein
-    ? item.fixedProteinGrams
-    : target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : 0;
-  // For fixed-portion veggie protein sources, this is what a full target-matching
-  // portion would require — shown as advisory text only, never used in the totals.
-  const proteinTargetEquivalent =
-    usesFixedProtein && target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : null;
-
-  const usesFixedCarb = !!item.fixedCarbGrams;
-  const carbPortion = usesFixedCarb
-    ? item.fixedCarbGrams
-    : target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
-  // Same idea as the protein version, for a deliberately low-carb-density
-  // carb source (cauliflower rice, courgette noodles, a fruit-based bowl)
-  // that shouldn't be scaled to 100% of the target in one giant portion.
-  const carbTargetEquivalent =
-    usesFixedCarb && target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : null;
-
-  const proteinG = (proteinPortion * item.proteinPer100) / 100;
-  const carbG = (carbPortion * item.carbPer100) / 100;
-  const extras = item.extras || [];
-  const extrasCalories = extras.reduce((sum, e) => sum + (e.grams * e.kcalPer100) / 100, 0);
-  const extrasFat = extras.reduce((sum, e) => sum + (e.grams * (e.fatPer100 || 0)) / 100, 0);
-  const calories =
-    (proteinPortion * item.proteinKcalPer100) / 100 +
-    (carbPortion * item.carbKcalPer100) / 100 +
-    extrasCalories;
-  const fat =
-    (proteinPortion * (item.proteinFatPer100 || 0)) / 100 +
-    (carbPortion * (item.carbFatPer100 || 0)) / 100 +
-    extrasFat;
-  return {
-    proteinPortion, carbPortion, proteinG, carbG, calories, fat,
-    usesFixedProtein, proteinTargetEquivalent, usesFixedCarb, carbTargetEquivalent,
-  };
-}
 
 function fixedMacros(item) {
   const protein = (item.g1 * item.protein1) / 100 + (item.food2 ? (item.g2 * item.protein2) / 100 : 0);
@@ -1030,22 +933,26 @@ function TrendsChart({ logsByDate, targets }) {
   );
 }
 
-function ProgressBar({ label, consumed, target, unit }) {
+function ProgressBar({ label, consumed, target, unit, color }) {
   const pct = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
+  const rawPct = target > 0 ? Math.round((consumed / target) * 100) : 0;
   const over = consumed > target;
+  const barColor = color || "#14403E";
   return (
     <div className="mb-3">
       <div className="flex justify-between items-baseline mb-1">
-        <span className="text-xs font-medium" style={{ color: "#40473F" }}>{label}</span>
-        <span className="pe-mono text-xs" style={{ color: over ? "#B5652F" : "#6B6355" }}>
-          {round(consumed)} / {round(target)}{unit}
-          {over && <span className="font-semibold"> · over by {round(consumed - target)}{unit}</span>}
+        <span className="text-sm font-semibold" style={{ color: "#14403E" }}>
+          {label} <span className="text-xs font-normal pe-mono" style={{ color: "#948A78" }}>- {round(consumed)} / {round(target)}{unit}</span>
+        </span>
+        <span className="pe-mono text-xs font-semibold" style={{ color: over ? "#B5652F" : "#948A78" }}>
+          {over && <span>over by {round(consumed - target)}{unit} · </span>}
+          {rawPct}%
         </span>
       </div>
       <div className="w-full rounded-full h-2" style={{ background: "#E9E5D8" }}>
         <div
           className="h-2 rounded-full"
-          style={{ width: `${pct}%`, background: over ? "#B5652F" : "#14403E", transition: "width 0.2s ease" }}
+          style={{ width: `${pct}%`, background: over ? "#B5652F" : barColor, transition: "width 0.2s ease" }}
         />
       </div>
     </div>
@@ -1064,6 +971,74 @@ function todayStr() {
 function nowTimeStr() {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function mondayOf(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function CoachWeekPlanCard({ onViewRecipe }) {
+  const [weekPlan, setWeekPlan] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    const weekStart = mondayOf(new Date());
+    getMyWeekPlan(weekStart)
+      .then((res) => setWeekPlan(res))
+      .catch(() => setWeekPlan(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading || !weekPlan || !weekPlan.plan || Object.keys(weekPlan.plan).length === 0) return null;
+
+  const days = Object.keys(weekPlan.plan).sort();
+
+  return (
+    <div className="pe-card p-4 mb-4">
+      <button className="flex items-center justify-between w-full" onClick={() => setExpanded((v) => !v)}>
+        <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>
+          🗓 Your coach's picks this week
+        </div>
+        <span className="text-xs" style={{ color: "#948A78" }}>{expanded ? "Hide ▲" : "Show ▼"}</span>
+      </button>
+      {expanded && (
+        <div className="pe-fadein mt-3">
+          {weekPlan.coach_note && (
+            <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#F5F4EE", color: "#40473F" }}>
+              {weekPlan.coach_note}
+            </div>
+          )}
+          <div className="space-y-2">
+            {days.map((date) => {
+              const dayPlan = weekPlan.plan[date];
+              const picks = [dayPlan?.lunch, dayPlan?.dinner].filter(Boolean);
+              if (picks.length === 0) return null;
+              return (
+                <div key={date} className="pe-divider pt-2">
+                  <div className="pe-mono text-[11px] mb-1" style={{ color: "#948A78" }}>{date}</div>
+                  {picks.map((p, i) => (
+                    <button
+                      key={i}
+                      className="text-xs font-medium block mb-1"
+                      style={{ color: "#14403E" }}
+                      onClick={() => onViewRecipe(p.section, p.name)}
+                    >
+                      {p.section}: {p.name} →
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function entryMacros(entry) {
@@ -1385,8 +1360,12 @@ function GymScreen({ profile, onAddToTodayLog, onViewRecipe }) {
   );
 }
 
-function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes }) {
+function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
+  const [coachFeedback, setCoachFeedback] = useState({});
+  useEffect(() => {
+    getMyFeedback().then(setCoachFeedback).catch(() => {});
+  }, []);
   const [query, setQuery] = useState("");
   const [pendingFood, setPendingFood] = useState(null);
   const [pendingGrams, setPendingGrams] = useState(100);
@@ -1501,14 +1480,15 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   };
 
   const exportLogCSV = () => {
-    const rows = [["Date", "Time", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Day notes"]];
+    const rows = [["Date", "Time", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Water (glasses)", "Day notes"]];
     const dates = Object.keys(logsByDate).sort();
     dates.forEach((date) => {
       const entries = logsByDate[date] || [];
       const notes = dayNotes?.[date] || "";
-      if (entries.length === 0 && !notes) return;
+      const water = waterByDate?.[date];
+      if (entries.length === 0 && !notes && !water) return;
       if (entries.length === 0) {
-        rows.push([date, "", "", "", "", "", "", "", "", notes]);
+        rows.push([date, "", "", "", "", "", "", "", "", water || "", notes]);
         return;
       }
       entries.forEach((entry, i) => {
@@ -1525,6 +1505,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
           notYetQuantified ? "" : round(m.protein),
           notYetQuantified ? "" : round(m.carbs),
           notYetQuantified ? "" : round(m.fat),
+          i === 0 ? (water || "") : "",
           i === 0 ? notes : "", // notes only on the first row of that day, to avoid repeating
         ]);
       });
@@ -1557,6 +1538,17 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         Log meals or individual foods and see them stack up against your daily target. Each day is saved separately.
       </p>
 
+      <CoachWeekPlanCard onViewRecipe={onViewRecipe} />
+
+      {coachFeedback[selectedDate] && (
+        <div className="pe-card p-4 mb-4" style={{ background: "#EEF3EC" }}>
+          <div className="pe-display text-sm font-semibold mb-1.5" style={{ color: "#4F6B41" }}>
+            💬 Feedback from your coach
+          </div>
+          <p className="text-sm" style={{ color: "#40473F" }}>{coachFeedback[selectedDate]}</p>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 mb-4">
         <input
           type="date"
@@ -1588,10 +1580,32 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       <TrendsChart logsByDate={logsByDate} targets={targets} />
 
       <div className="pe-card p-4 mb-4">
-        <ProgressBar label="Calories" consumed={totals.calories} target={targets.calories} unit="" />
-        <ProgressBar label="Protein" consumed={totals.protein} target={targets.protein} unit="g" />
-        <ProgressBar label="Carbs" consumed={totals.carbs} target={targets.carbs} unit="g" />
-        <ProgressBar label="Fat" consumed={totals.fat} target={targets.fat} unit="g" />
+        <ProgressBar label="Energy" consumed={totals.calories} target={targets.calories} unit=" kcal" color="#E08D52" />
+        <ProgressBar label="Protein" consumed={totals.protein} target={targets.protein} unit="g" color="#6FA968" />
+        <ProgressBar label="Net Carbs" consumed={totals.carbs} target={targets.carbs} unit="g" color="#4FA3AC" />
+        <ProgressBar label="Fat" consumed={totals.fat} target={targets.fat} unit="g" color="#A67FC0" />
+      </div>
+
+      <div className="pe-card p-4 mb-4">
+        <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>💧 Water</div>
+        <ProgressBar label="Glasses" consumed={waterByDate?.[selectedDate] || 0} target={8} unit="" color="#5B9BD5" />
+        <div className="flex items-center gap-3 mt-2">
+          <button
+            className="pe-btn-secondary w-9 h-9 rounded-full text-lg font-bold flex items-center justify-center"
+            onClick={() => updateWater(selectedDate, (waterByDate?.[selectedDate] || 0) - 1)}
+          >
+            −
+          </button>
+          <span className="text-xs flex-1 text-center" style={{ color: "#948A78" }}>
+            Tap to log a glass as you drink it — roughly 8 x 250ml is a common everyday guideline, not a strict target.
+          </span>
+          <button
+            className="pe-btn-primary w-9 h-9 rounded-full text-lg font-bold flex items-center justify-center"
+            onClick={() => updateWater(selectedDate, (waterByDate?.[selectedDate] || 0) + 1)}
+          >
+            +
+          </button>
+        </div>
       </div>
 
       <div className="pe-card p-4 mb-4">
@@ -2597,6 +2611,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
   const [cart, setCartState] = useState({});
   const [logsByDate, setLogsByDate] = useState({});
   const [dayNotes, setDayNotes] = useState({});
+  const [waterByDate, setWaterByDate] = useState({});
   const [checkedItems, setCheckedItemsState] = useState({});
   const [jumpTarget, setJumpTarget] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
@@ -2647,6 +2662,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       const c = await loadStored("pe_cart", {});
       const l = await loadStored("pe_logs_by_date", {});
       const dn = await loadStored("pe_day_notes", {});
+      const wt = await loadStored("pe_water_by_date", {});
       const ch = await loadStored("pe_checked_items", {});
       const oh = await loadStored("pe_order_history", []);
       const hi = await loadStored("pe_hidden_items", {});
@@ -2654,6 +2670,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       setCartState(c);
       setLogsByDate(l);
       setDayNotes(dn);
+      setWaterByDate(wt);
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
@@ -2698,6 +2715,14 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
     setDayNotes((prev) => {
       const next = { ...prev, [date]: text };
       saveStored("pe_day_notes", next);
+      return next;
+    });
+  }, []);
+
+  const updateWater = useCallback((date, glasses) => {
+    setWaterByDate((prev) => {
+      const next = { ...prev, [date]: Math.max(0, glasses) };
+      saveStored("pe_water_by_date", next);
       return next;
     });
   }, []);
@@ -2837,7 +2862,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
             onProfileRefresh={onProfileRefresh}
           />
         )}
-        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} />}
+        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
