@@ -77,6 +77,15 @@ create policy "insert own profile" on profiles
 create policy "coach reads own athletes" on profiles
   for select using (coach_id = auth.uid());
 
+-- Any signed-in user needs to be able to look up a coach's account by email
+-- in order to link to them (Setup -> Coach -> enter their email) — without
+-- this, that lookup silently returns nothing even when the coach's row
+-- exists, because no other policy permits seeing someone else's row. This
+-- only exposes coach rows, never other athletes' rows, so it doesn't weaken
+-- athlete privacy.
+create policy "anyone can look up coach accounts" on profiles
+  for select using (role = 'coach');
+
 -- Super admins (you) can see and approve every profile.
 create policy "super admin reads all profiles" on profiles
   for select using (
