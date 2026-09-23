@@ -116,3 +116,67 @@ create policy "coach reads athlete data" on athlete_data
       and pr.coach_id = auth.uid()
     )
   );
+
+-- One row per athlete per week: a coach's suggested meal picks for that week.
+-- This is the one place a coach WRITES into an athlete's world rather than
+-- just reading it, so it needed its own table and its own RLS rather than
+-- reusing athlete_data (which athletes own and coaches only read).
+create table if not exists coach_meal_plans (
+  id uuid primary key default gen_random_uuid(),
+  athlete_id uuid not null references profiles(id) on delete cascade,
+  coach_id uuid not null references profiles(id) on delete cascade,
+  week_start date not null,
+  plan jsonb not null default '{}'::jsonb,
+  coach_note text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (athlete_id, week_start)
+);
+
+alter table coach_meal_plans enable row level security;
+
+-- A coach can create/update/remove a plan only for an athlete who is
+-- actually linked to them — not any arbitrary athlete_id they might guess.
+create policy "coach manages own athlete plans" on coach_meal_plans
+  for all using (
+    coach_id = auth.uid()
+    and exists (select 1 from profiles pr where pr.id = athlete_id and pr.coach_id = auth.uid())
+  )
+  with check (
+    coach_id = auth.uid()
+    and exists (select 1 from profiles pr where pr.id = athlete_id and pr.coach_id = auth.uid())
+  );
+
+-- An athlete can see (but not edit) the plans their own coach has made for them.
+create policy "athlete reads own plans" on coach_meal_plans
+  for select using (athlete_id = auth.uid());
+
+-- One row per athlete per day: a coach's feedback on that specific day —
+-- separate from coach_meal_plans (which is about future suggestions) since
+-- feedback is about a day that's already happened, whether or not that day
+-- had a meal plan at all.
+create table if not exists coach_feedback (
+  id uuid primary key default gen_random_uuid(),
+  athlete_id uuid not null references profiles(id) on delete cascade,
+  coach_id uuid not null references profiles(id) on delete cascade,
+  entry_date date not null,
+  message text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (athlete_id, entry_date)
+);
+
+alter table coach_feedback enable row level security;
+
+create policy "coach manages own athlete feedback" on coach_feedback
+  for all using (
+    coach_id = auth.uid()
+    and exists (select 1 from profiles pr where pr.id = athlete_id and pr.coach_id = auth.uid())
+  )
+  with check (
+    coach_id = auth.uid()
+    and exists (select 1 from profiles pr where pr.id = athlete_id and pr.coach_id = auth.uid())
+  );
+
+create policy "athlete reads own feedback" on coach_feedback
+  for select using (athlete_id = auth.uid());
