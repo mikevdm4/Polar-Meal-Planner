@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient.js";
 import { signUp, signIn, getMyAthletes, getAthleteData, getPendingCoaches, approveCoach, rejectCoach, saveWeekPlan, getAthleteWeekPlan, saveFeedback, deleteFeedback, getAthleteFeedback } from "./auth.js";
-import { RECIPE_DATA } from "./data.js";
-import { computeTargets, mealTarget, scaledMacros } from "./calculations.js";
+import { computeTargets } from "./calculations.js";
+import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
 export function AuthScreen({ onAuthed }) {
   const [mode, setMode] = useState("signin"); // signin | signup | forgot
@@ -700,29 +700,6 @@ function AthleteSummary({ data, athleteId, coachId }) {
   );
 }
 
-function mondayOf(date) {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day; // shift Sunday back to the Monday before it
-  d.setDate(d.getDate() + diff);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-const PLAN_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-
-function computeDayMacros(dayPlan, targets) {
-  let calories = 0, protein = 0, carbs = 0, fat = 0;
-  ["lunch", "dinner"].forEach((slot) => {
-    const pick = dayPlan?.[slot];
-    if (!pick) return;
-    const item = RECIPE_DATA.sections[pick.section]?.items.find((i) => i.name === pick.name);
-    if (!item) return;
-    const target = mealTarget(pick.section, targets);
-    const m = scaledMacros(item, target);
-    calories += m.calories; protein += m.proteinG; carbs += m.carbG; fat += m.fat;
-  });
-  return { calories, protein, carbs, fat };
-}
 
 function WeekPlanner({ athleteId, coachId }) {
   const [weekOffset, setWeekOffset] = useState(0); // 0 = this week, up to ~4 = about a month out
@@ -732,8 +709,7 @@ function WeekPlanner({ athleteId, coachId }) {
   const [saveStatus, setSaveStatus] = useState(""); // "" | "saving" | "saved" | "error"
   const [athleteProfile, setAthleteProfile] = useState(null);
   const [copyStatus, setCopyStatus] = useState("");
-
-  const round = (n) => Math.round(n || 0);
+  const [openDay, setOpenDay] = useState(null);
 
   const weekStartDate = new Date();
   weekStartDate.setDate(weekStartDate.getDate() + weekOffset * 7);
@@ -743,14 +719,7 @@ function WeekPlanner({ athleteId, coachId }) {
   prevWeekStartDate.setDate(prevWeekStartDate.getDate() + (weekOffset - 1) * 7);
   const prevWeekStart = mondayOf(prevWeekStartDate);
 
-  const weekDates = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(weekStart);
-    d.setDate(d.getDate() + i);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  });
-
-  const lunchOptions = RECIPE_DATA.sections.Lunch.items.map((i) => i.name);
-  const dinnerOptions = RECIPE_DATA.sections.Dinner.items.map((i) => i.name);
+  const weekDates = weekDatesFrom(weekStart);
 
   useEffect(() => {
     setLoading(true);
@@ -766,10 +735,10 @@ function WeekPlanner({ athleteId, coachId }) {
 
   const targets = athleteProfile ? computeTargets(athleteProfile) : null;
 
-  const setPick = (date, mealType, recipeName) => {
+  const setPick = (date, slotKey, section, recipeName) => {
     setPlan((prev) => ({
       ...prev,
-      [date]: { ...prev[date], [mealType]: recipeName ? { name: recipeName, section: mealType === "lunch" ? "Lunch" : "Dinner" } : undefined },
+      [date]: { ...prev[date], [slotKey]: recipeName ? { name: recipeName, section } : undefined },
     }));
   };
 
@@ -834,6 +803,8 @@ function WeekPlanner({ athleteId, coachId }) {
         </button>
       </div>
 
+      {targets && <WeekOverviewStrip weekDates={weekDates} plan={plan} targets={targets} />}
+
       <button
         className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold mb-3"
         onClick={copyFromPreviousWeek}
@@ -847,43 +818,30 @@ function WeekPlanner({ athleteId, coachId }) {
 
       {weekDates.map((date, i) => {
         const dayMacros = targets ? computeDayMacros(plan[date], targets) : null;
-        const dailyTarget = targets ? targets.calories : null;
+        const isOpen = openDay === date;
         return (
           <div key={date} className="pe-card p-3 mb-2">
-            <div className="flex items-center justify-between mb-2">
+            <button className="w-full flex items-center justify-between" onClick={() => setOpenDay(isOpen ? null : date)}>
               <div className="text-xs font-semibold" style={{ color: "#14403E" }}>
                 {PLAN_DAY_LABELS[i]} <span className="pe-mono" style={{ color: "#948A78" }}>· {date}</span>
               </div>
-              {dayMacros && (dayMacros.calories > 0) && (
-                <div className="pe-mono text-[11px]" style={{ color: "#948A78" }}>
-                  {round(dayMacros.calories)} kcal{dailyTarget ? ` / ${round(dailyTarget)}` : ""} · P{round(dayMacros.protein)} C{round(dayMacros.carbs)} F{round(dayMacros.fat)}
-                </div>
-              )}
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              <div>
-                <label className="text-[10px] font-medium" style={{ color: "#948A78" }}>Lunch</label>
-                <select
-                  className="pe-input w-full px-2 py-1.5 text-xs"
-                  value={plan[date]?.lunch?.name || ""}
-                  onChange={(e) => setPick(date, "lunch", e.target.value)}
-                >
-                  <option value="">— No suggestion —</option>
-                  {lunchOptions.map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
+              <span className="text-xs" style={{ color: "#948A78" }}>{isOpen ? "Hide ▲" : "Show ▼"}</span>
+            </button>
+            {dayMacros && dayMacros.calories > 0 && !isOpen && (
+              <div className="pe-mono text-[11px] mt-1" style={{ color: "#948A78" }}>
+                {Math.round(dayMacros.calories)} kcal{targets ? ` / ${Math.round(targets.calories)}` : ""}
               </div>
-              <div>
-                <label className="text-[10px] font-medium" style={{ color: "#948A78" }}>Dinner</label>
-                <select
-                  className="pe-input w-full px-2 py-1.5 text-xs"
-                  value={plan[date]?.dinner?.name || ""}
-                  onChange={(e) => setPick(date, "dinner", e.target.value)}
-                >
-                  <option value="">— No suggestion —</option>
-                  {dinnerOptions.map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
+            )}
+            {isOpen && (
+              <div className="pe-fadein mt-2">
+                {dayMacros && targets && (
+                  <div className="mb-3">
+                    <DayMacroBars macros={dayMacros} targets={targets} compact />
+                  </div>
+                )}
+                <MealSlotPicker date={date} plan={plan} setPick={setPick} />
               </div>
-            </div>
+            )}
           </div>
         );
       })}

@@ -1,11 +1,13 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Html5Qrcode } from "html5-qrcode";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
 import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
 import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail, getMyWeekPlan, getMyFeedback } from "./auth.js";
 import { pullUserData } from "./authSync.js";
 import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
-import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros } from "./calculations.js";
+import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros, fixedMacros, recipeMacros } from "./calculations.js";
+import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
@@ -85,13 +87,7 @@ const DEFAULT_PROFILE = {
 };
 
 
-function fixedMacros(item) {
-  const protein = (item.g1 * item.protein1) / 100 + (item.food2 ? (item.g2 * item.protein2) / 100 : 0);
-  const carbs = (item.g1 * item.carb1) / 100 + (item.food2 ? (item.g2 * item.carb2) / 100 : 0);
-  const calories = (item.g1 * item.kcal1) / 100 + (item.food2 ? (item.g2 * item.kcal2) / 100 : 0);
-  const fat = (item.g1 * (item.fat1 || 0)) / 100 + (item.food2 ? (item.g2 * (item.fat2 || 0)) / 100 : 0);
-  return { protein, carbs, calories, fat };
-}
+
 
 function round(n) {
   return Math.round(n || 0);
@@ -260,6 +256,12 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         <p><strong>Meal distribution</strong> — by default your protein and carbs split evenly across your meals.
         Drag the sliders if you want a bigger breakfast and a lighter dinner, say, or add snacks that each claim
         a % of your day.</p>
+        <p><strong>Coach</strong> — link, switch, or remove your coach's account at any time by entering their
+        email, even if you skipped this when you signed up.</p>
+        <p><strong>Password & Email</strong> — change either directly here; an email change needs confirming via
+        a link sent to the new address before it takes effect.</p>
+        <p>The <strong>🔪 Cooking Guide</strong>, right below Help & Guide, is worth a look separately — meal
+        prep strategy and everyday technique (searing, seasoning, roasting) rather than how the app works.</p>
       </Section>
 
       <Section title="🍽 Recipes — browsing and filtering">
@@ -293,15 +295,39 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         the protein source if you used something different), <strong>Add a food</strong> (search the ingredient
         database and enter grams), or <strong>Log manually</strong> for anything else — a takeaway, a meal
         replacement.</p>
+        <p><strong>📷 Scan barcode</strong> and <strong>🔍 Packaged product</strong> both sit above the food
+        search. Scanning opens your camera and looks the product up automatically; the packaged product search
+        is for typing a branded item's name instead (a protein bar, a cereal) when you don't have the packet to
+        hand. Both pull from Open Food Facts, a free, community-maintained database — always worth a glance at
+        the figures before adding, especially for less common products.</p>
         <p>Logging manually doesn't require the numbers up front — leave calories blank if you just want to
         record <em>what</em> and <em>when</em> you ate something, and add the nutrition info later by tapping
         "Add nutrition info" on that entry.</p>
+        <p>The <strong>colour-coded bars</strong> (Energy, Protein, Net Carbs, Fat) update the moment you log
+        something — no refresh needed. Tap <strong>Today / This week</strong> above them to switch between
+        today's numbers and your daily average across the last 7 days.</p>
+        <p>The <strong>💧 Water</strong> tracker sits just below — tap + as you drink a glass through the day.</p>
         <p>The <strong>"How are you feeling today?"</strong> notes box is there for tracking bloating, energy,
         digestion, or mood alongside what you ate — useful for spotting patterns over time.</p>
+        <p>If your coach has left you feedback on a specific day, it shows here too — a <strong>"💬 Feedback
+        from your coach"</strong> card appears automatically when you're viewing that date.</p>
         <p>The <strong>Trends</strong> chart shows your last week or month at a glance, with workout-related
         nutrition shown in a separate colour from everyday meals.</p>
         <p>Tap <strong>⬇ Export</strong> at the top to download your entire log history (every day, every entry,
         every note) as a spreadsheet.</p>
+      </Section>
+
+      <Section title="🗓 Plan — setting your week out ahead of time">
+        <p>Pick a Breakfast, Lunch, Dinner, Snack, and Dessert for each day of the week, up to about a month
+        ahead. Each day shows the same colour-coded macro bars as the Daily Log, so you can see what a day's
+        picks actually add up to before committing to it — genuinely useful for spotting a day that's come out
+        too light or too heavy before you've bought anything.</p>
+        <p><strong>"Copy last week's plan as a starting point"</strong> pulls your previous week's picks into
+        the current one, so you're editing rather than starting from a blank week each time.</p>
+        <p>Once you're happy with a week, <strong>"🧺 Add this week's picks to my order"</strong> puts every
+        picked recipe straight into your cart in one go — head to Shopping afterward for the combined list.</p>
+        <p>If your coach has suggested meals for the week, those show up automatically in your Daily Log as
+        well, separate from your own plan here.</p>
       </Section>
 
       <Section title="🔄 Syncing & working offline">
@@ -973,14 +999,6 @@ function nowTimeStr() {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-function mondayOf(date) {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
 function CoachWeekPlanCard({ onViewRecipe }) {
   const [weekPlan, setWeekPlan] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1360,6 +1378,223 @@ function GymScreen({ profile, onAddToTodayLog, onViewRecipe }) {
   );
 }
 
+function MyWeekPlanScreen({ profile, myWeekPlans, updateMyWeekPlan, updateCart, onViewRecipe }) {
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [openDay, setOpenDay] = useState(null);
+  const [addStatus, setAddStatus] = useState("");
+
+  const weekStartDate = new Date();
+  weekStartDate.setDate(weekStartDate.getDate() + weekOffset * 7);
+  const weekStart = mondayOf(weekStartDate);
+  const weekDates = weekDatesFrom(weekStart);
+
+  const prevWeekStartDate = new Date();
+  prevWeekStartDate.setDate(prevWeekStartDate.getDate() + (weekOffset - 1) * 7);
+  const prevWeekStart = mondayOf(prevWeekStartDate);
+
+  const plan = myWeekPlans[weekStart]?.plan || {};
+  const targets = computeTargets(profile);
+
+  const setPick = (date, slotKey, section, recipeName) => {
+    const nextPlan = {
+      ...plan,
+      [date]: { ...plan[date], [slotKey]: recipeName ? { name: recipeName, section } : undefined },
+    };
+    updateMyWeekPlan(weekStart, nextPlan);
+  };
+
+  const copyFromPreviousWeek = () => {
+    const prevPlan = myWeekPlans[prevWeekStart]?.plan;
+    if (prevPlan) updateMyWeekPlan(weekStart, prevPlan);
+  };
+
+  const addWeekToOrder = () => {
+    let added = 0;
+    weekDates.forEach((date) => {
+      const dayPlan = plan[date];
+      if (!dayPlan) return;
+      Object.values(dayPlan).forEach((pick) => {
+        if (!pick) return;
+        const sectionData = RECIPE_DATA.sections[pick.section];
+        const item = sectionData?.items.find((i) => i.name === pick.name);
+        if (!item) return;
+        const key = `${pick.section}::${pick.name}`;
+        const isFixed = sectionData.type === "fixed";
+        updateCart(key, pick.section, item, isFixed, 1);
+        added++;
+      });
+    });
+    setAddStatus(added > 0 ? `added` : "empty");
+  };
+
+  const weekLabel = weekOffset === 0 ? "this week" : weekOffset === 1 ? "next week" : `in ${weekOffset} weeks`;
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Plan your week</h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        Set out your meals ahead of time, see what they come to against your targets, then add the whole week
+        to your order in one go and shop accordingly.
+      </p>
+
+      <div className="flex items-center justify-between mb-3">
+        <button
+          className="text-xs font-medium"
+          style={{ color: weekOffset === 0 ? "#B8B2A0" : "#14403E" }}
+          onClick={() => setWeekOffset((w) => Math.max(0, w - 1))}
+          disabled={weekOffset === 0}
+        >
+          ← Prev
+        </button>
+        <span className="text-sm font-semibold" style={{ color: "#14403E" }}>
+          Week of {weekStart} ({weekLabel})
+        </span>
+        <button
+          className="text-xs font-medium"
+          style={{ color: weekOffset >= 4 ? "#B8B2A0" : "#14403E" }}
+          onClick={() => setWeekOffset((w) => Math.min(4, w + 1))}
+          disabled={weekOffset >= 4}
+        >
+          Next →
+        </button>
+      </div>
+
+      <WeekOverviewStrip weekDates={weekDates} plan={plan} targets={targets} />
+
+      <button
+        className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold mb-3"
+        onClick={copyFromPreviousWeek}
+        disabled={weekOffset === 0}
+        style={weekOffset === 0 ? { opacity: 0.5 } : {}}
+      >
+        📋 Copy last week's plan as a starting point
+      </button>
+
+      {weekDates.map((date, i) => {
+        const dayMacros = computeDayMacros(plan[date], targets);
+        const isOpen = openDay === date;
+        return (
+          <div key={date} className="pe-card p-3 mb-2">
+            <button className="w-full flex items-center justify-between" onClick={() => setOpenDay(isOpen ? null : date)}>
+              <div className="text-xs font-semibold" style={{ color: "#14403E" }}>
+                {PLAN_DAY_LABELS[i]} <span className="pe-mono" style={{ color: "#948A78" }}>· {date}</span>
+              </div>
+              <span className="text-xs" style={{ color: "#948A78" }}>{isOpen ? "Hide ▲" : "Show ▼"}</span>
+            </button>
+            {!isOpen && dayMacros.calories > 0 && (
+              <div className="pe-mono text-[11px] mt-1" style={{ color: "#948A78" }}>
+                {Math.round(dayMacros.calories)} kcal / {Math.round(targets.calories)}
+              </div>
+            )}
+            {isOpen && (
+              <div className="pe-fadein mt-2">
+                <div className="mb-3">
+                  <DayMacroBars macros={dayMacros} targets={targets} compact />
+                </div>
+                <MealSlotPicker date={date} plan={plan} setPick={setPick} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <button className="pe-btn-primary w-full py-2.5 rounded-full text-sm font-semibold mt-2" onClick={addWeekToOrder}>
+        🧺 Add this week's picks to my order
+      </button>
+      {addStatus === "added" && (
+        <p className="text-xs mt-2 text-center" style={{ color: "#4F6B41" }}>Added to your order — head to Order or Shop to see it.</p>
+      )}
+      {addStatus === "empty" && (
+        <p className="text-xs mt-2 text-center" style={{ color: "#948A78" }}>Nothing picked yet for this week.</p>
+      )}
+    </div>
+  );
+}
+
+// Open Food Facts — free, no API key, no signup, ~3M+ products by barcode.
+// It can return HTTP 200 with status:0 for a barcode it doesn't recognise,
+// so that has to be checked explicitly rather than trusting the HTTP status.
+function extractProductNutrition(p) {
+  const n = p.nutriments || {};
+  const kcal = n["energy-kcal_100g"] ?? (n["energy_100g"] ? n["energy_100g"] / 4.184 : null);
+  if (kcal == null) return null;
+  return {
+    name: p.product_name || p.generic_name || "Unknown product",
+    brand: p.brands || "",
+    kcal: Math.round(kcal),
+    protein: Math.round((n["proteins_100g"] || 0) * 10) / 10,
+    carb: Math.round((n["carbohydrates_100g"] || 0) * 10) / 10,
+    fat: Math.round((n["fat_100g"] || 0) * 10) / 10,
+  };
+}
+
+async function lookupBarcode(barcode) {
+  const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
+  if (!res.ok) throw new Error("Couldn't reach the barcode database — check your connection and try again.");
+  const data = await res.json();
+  if (data.status !== 1 || !data.product) {
+    throw new Error("No product found for that barcode — it may not be in the database yet. You can log it manually instead.");
+  }
+  const product = extractProductNutrition(data.product);
+  if (!product) throw new Error("Found the product, but it has no nutrition data on file — you'll need to log it manually.");
+  return product;
+}
+
+// Open Food Facts also has a genuine free, no-key text-search endpoint,
+// separate from the barcode one — useful specifically for branded/packaged
+// products (a cereal box, a named protein bar) rather than generic whole
+// foods, which the app's own curated list already covers better.
+async function searchPackagedProducts(query) {
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=15`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Couldn't reach the product database — check your connection and try again.");
+  const data = await res.json();
+  const products = (data.products || [])
+    .map(extractProductNutrition)
+    .filter(Boolean)
+    .filter((p) => p.name !== "Unknown product");
+  return products.slice(0, 10);
+}
+
+
+function BarcodeScannerModal({ onScan, onClose }) {
+  const scannerRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const scanner = new Html5Qrcode("barcode-reader");
+    scannerRef.current = scanner;
+    scanner
+      .start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 260, height: 160 } },
+        (decodedText) => {
+          scanner.stop().catch(() => {});
+          onScan(decodedText);
+        },
+        () => {} // fires continuously while no code is found — not a real error
+      )
+      .catch(() => setError("Couldn't access the camera — check camera permissions for this site."));
+
+    return () => {
+      scanner.stop().catch(() => {});
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#0F1210" }}>
+      <div className="flex items-center justify-between p-4">
+        <span className="text-sm font-semibold text-white">Scan a barcode</span>
+        <button className="text-white text-2xl leading-none" onClick={onClose}>×</button>
+      </div>
+      <div id="barcode-reader" className="flex-1 mx-4 rounded-xl overflow-hidden" style={{ background: "#000" }} />
+      <p className="text-center text-xs text-white opacity-70 p-4">
+        {error || "Line up the barcode inside the frame — it'll scan automatically."}
+      </p>
+    </div>
+  );
+}
+
 function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [coachFeedback, setCoachFeedback] = useState({});
@@ -1402,7 +1637,80 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     );
   }, [dayLog]);
 
+  const [macroView, setMacroView] = useState("today");
+
+  const weekAvg = useMemo(() => {
+    const sum = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    for (let i = 0; i < 7; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = dateStr(d);
+      (logsByDate[key] || []).forEach((entry) => {
+        const m = entryMacros(entry);
+        sum.calories += m.calories; sum.protein += m.protein; sum.carbs += m.carbs; sum.fat += m.fat;
+      });
+    }
+    return { calories: sum.calories / 7, protein: sum.protein / 7, carbs: sum.carbs / 7, fat: sum.fat / 7 };
+  }, [logsByDate]);
+
   const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannedProduct, setScannedProduct] = useState(null);
+  const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
+  const [scanError, setScanError] = useState("");
+  const [scannedGrams, setScannedGrams] = useState(100);
+
+  const [packagedSearchOpen, setPackagedSearchOpen] = useState(false);
+  const [packagedQuery, setPackagedQuery] = useState("");
+  const [packagedResults, setPackagedResults] = useState([]);
+  const [packagedStatus, setPackagedStatus] = useState("");
+  const [packagedError, setPackagedError] = useState("");
+
+  const runPackagedSearch = async () => {
+    if (!packagedQuery.trim()) return;
+    setPackagedStatus("loading");
+    setPackagedError("");
+    setPackagedResults([]);
+    try {
+      const results = await searchPackagedProducts(packagedQuery);
+      if (results.length === 0) setPackagedError("No packaged products matched that search.");
+      setPackagedResults(results);
+      setPackagedStatus("");
+    } catch (e) {
+      setPackagedStatus("error");
+      setPackagedError(e.message);
+    }
+  };
+
+  const handleBarcodeScanned = async (barcode) => {
+    setScannerOpen(false);
+    setScanStatus("loading");
+    setScanError("");
+    try {
+      const product = await lookupBarcode(barcode);
+      setScannedProduct(product);
+      setScannedGrams(100);
+      setScanStatus("");
+    } catch (e) {
+      setScanStatus("error");
+      setScanError(e.message);
+    }
+  };
+
+  const addScannedProduct = () => {
+    if (!scannedProduct) return;
+    updateDayLog(selectedDate, [
+      ...dayLog,
+      {
+        id: Date.now(), type: "food",
+        food: { name: scannedProduct.brand ? `${scannedProduct.name} (${scannedProduct.brand})` : scannedProduct.name,
+                kcal: scannedProduct.kcal, protein: scannedProduct.protein, carb: scannedProduct.carb, fat: scannedProduct.fat },
+        grams: Number(scannedGrams) || 100,
+        time: nowTimeStr(),
+      },
+    ]);
+    setScannedProduct(null);
+  };
 
   const addFood = () => {
     if (!pendingFood || !pendingGrams) return;
@@ -1524,6 +1832,9 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      {scannerOpen && (
+        <BarcodeScannerModal onScan={handleBarcodeScanned} onClose={() => setScannerOpen(false)} />
+      )}
       <div className="flex items-center justify-between mb-1">
         <h2 className="pe-display text-xl font-semibold" style={{ color: "#14403E" }}>Daily log</h2>
         <button
@@ -1580,10 +1891,31 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       <TrendsChart logsByDate={logsByDate} targets={targets} />
 
       <div className="pe-card p-4 mb-4">
-        <ProgressBar label="Energy" consumed={totals.calories} target={targets.calories} unit=" kcal" color="#E08D52" />
-        <ProgressBar label="Protein" consumed={totals.protein} target={targets.protein} unit="g" color="#6FA968" />
-        <ProgressBar label="Net Carbs" consumed={totals.carbs} target={targets.carbs} unit="g" color="#4FA3AC" />
-        <ProgressBar label="Fat" consumed={totals.fat} target={targets.fat} unit="g" color="#A67FC0" />
+        <div className="flex gap-2 mb-3">
+          <button
+            className="text-xs font-semibold px-3 py-1 rounded-full"
+            style={macroView === "today" ? { background: "#14403E", color: "#fff" } : { background: "#EDE9DD", color: "#14403E" }}
+            onClick={() => setMacroView("today")}
+          >
+            Today
+          </button>
+          <button
+            className="text-xs font-semibold px-3 py-1 rounded-full"
+            style={macroView === "week" ? { background: "#14403E", color: "#fff" } : { background: "#EDE9DD", color: "#14403E" }}
+            onClick={() => setMacroView("week")}
+          >
+            This week (daily average)
+          </button>
+        </div>
+        <ProgressBar label="Energy" consumed={macroView === "today" ? totals.calories : weekAvg.calories} target={targets.calories} unit=" kcal" color="#E08D52" />
+        <ProgressBar label="Protein" consumed={macroView === "today" ? totals.protein : weekAvg.protein} target={targets.protein} unit="g" color="#6FA968" />
+        <ProgressBar label="Net Carbs" consumed={macroView === "today" ? totals.carbs : weekAvg.carbs} target={targets.carbs} unit="g" color="#4FA3AC" />
+        <ProgressBar label="Fat" consumed={macroView === "today" ? totals.fat : weekAvg.fat} target={targets.fat} unit="g" color="#A67FC0" />
+        {macroView === "week" && (
+          <p className="text-[11px] mt-1" style={{ color: "#948A78" }}>
+            Averaged across the last 7 days (days with nothing logged count as zero).
+          </p>
+        )}
       </div>
 
       <div className="pe-card p-4 mb-4">
@@ -1628,7 +1960,93 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       <AddMealLog profile={profile} onAdd={addMealEntry} onViewRecipe={onViewRecipe} />
 
       <div className="pe-card p-4 mb-4">
-        <div className="pe-display text-sm font-semibold mb-3" style={{ color: "#14403E" }}>Add a food</div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Add a food</div>
+          <div className="flex gap-2">
+            <button
+              className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+              onClick={() => { setPackagedSearchOpen((v) => !v); setScannedProduct(null); }}
+            >
+              🔍 Packaged product
+            </button>
+            <button
+              className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+              onClick={() => setScannerOpen(true)}
+            >
+              📷 Scan barcode
+            </button>
+          </div>
+        </div>
+        {packagedSearchOpen && (
+          <div className="pe-fadein mb-3">
+            <p className="text-[11px] mb-2" style={{ color: "#948A78" }}>
+              Searches branded/packaged products only (cereals, bars, ready meals) — for a generic ingredient
+              like "chicken breast" or "banana", use the search box below instead.
+            </p>
+            <input
+              className="pe-input w-full px-3 py-2.5 text-sm mb-2"
+              placeholder="e.g. Special K, Quest bar, Innocent smoothie..."
+              value={packagedQuery}
+              onChange={(e) => setPackagedQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runPackagedSearch(); }}
+            />
+            <button className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold" onClick={runPackagedSearch} disabled={packagedStatus === "loading"}>
+              {packagedStatus === "loading" ? "Searching…" : "Search"}
+            </button>
+            {packagedStatus === "error" && (
+              <p className="text-xs mt-2" style={{ color: "#B5652F" }}>{packagedError}</p>
+            )}
+            {packagedResults.length > 0 && (
+              <div className="mt-2 rounded-lg overflow-hidden" style={{ border: "1px solid #E4E1D6" }}>
+                {packagedResults.map((p, i) => (
+                  <button
+                    key={i}
+                    className="w-full text-left px-3 py-2 text-xs block"
+                    style={{ borderBottom: i < packagedResults.length - 1 ? "1px solid #E4E1D6" : "none" }}
+                    onClick={() => { setScannedProduct(p); setScannedGrams(100); setPackagedResults([]); setPackagedSearchOpen(false); }}
+                  >
+                    <div className="font-medium">{p.name}{p.brand ? ` (${p.brand})` : ""}</div>
+                    <div style={{ color: "#948A78" }}>{p.kcal} kcal · P{p.protein} C{p.carb} F{p.fat} per 100g</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {scanStatus === "loading" && (
+          <p className="text-xs mb-2" style={{ color: "#948A78" }}>Looking that up…</p>
+        )}
+        {scanStatus === "error" && (
+          <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+            {scanError}
+          </div>
+        )}
+        {scannedProduct && (
+          <div className="pe-fadein rounded-lg p-3 mb-3" style={{ background: "#F5F4EE", border: "1px solid #E4E1D6" }}>
+            <div className="text-sm font-semibold mb-1" style={{ color: "#14403E" }}>{scannedProduct.name}</div>
+            <div className="text-xs mb-2" style={{ color: "#948A78" }}>
+              Per 100g: {scannedProduct.kcal} kcal · P{scannedProduct.protein} C{scannedProduct.carb} F{scannedProduct.fat}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                value={scannedGrams}
+                onChange={(e) => setScannedGrams(e.target.value)}
+              />
+              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
+                Add
+              </button>
+              <button className="text-xs font-medium" style={{ color: "#948A78" }} onClick={() => setScannedProduct(null)}>
+                Cancel
+              </button>
+            </div>
+            <p className="text-[10px] mt-2" style={{ color: "#948A78" }}>
+              From Open Food Facts, a free community-maintained database — figures can occasionally be off or missing for less common products.
+            </p>
+          </div>
+        )}
         <input
           className="pe-input w-full px-3 py-2.5 mb-2 text-sm"
           placeholder="Search foods (e.g. chicken breast, oats...)"
@@ -2597,6 +3015,7 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
 const TABS = [
   { key: "log", label: "Daily Log", icon: "📊" },
   { key: "browse", label: "Recipes", icon: "🍴" },
+  { key: "plan", label: "Plan", icon: "🗓" },
   { key: "gym", label: "Gym", icon: "🏋" },
   { key: "order", label: "Order", icon: "🧺" },
   { key: "shopping", label: "Shop", icon: "🛒" },
@@ -2612,6 +3031,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
   const [logsByDate, setLogsByDate] = useState({});
   const [dayNotes, setDayNotes] = useState({});
   const [waterByDate, setWaterByDate] = useState({});
+  const [myWeekPlans, setMyWeekPlans] = useState({}); // { weekStart: { plan: {...} } }
   const [checkedItems, setCheckedItemsState] = useState({});
   const [jumpTarget, setJumpTarget] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
@@ -2663,6 +3083,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       const l = await loadStored("pe_logs_by_date", {});
       const dn = await loadStored("pe_day_notes", {});
       const wt = await loadStored("pe_water_by_date", {});
+      const mwp = await loadStored("pe_my_week_plans", {});
       const ch = await loadStored("pe_checked_items", {});
       const oh = await loadStored("pe_order_history", []);
       const hi = await loadStored("pe_hidden_items", {});
@@ -2671,6 +3092,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       setLogsByDate(l);
       setDayNotes(dn);
       setWaterByDate(wt);
+      setMyWeekPlans(mwp);
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
@@ -2723,6 +3145,14 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
     setWaterByDate((prev) => {
       const next = { ...prev, [date]: Math.max(0, glasses) };
       saveStored("pe_water_by_date", next);
+      return next;
+    });
+  }, []);
+
+  const updateMyWeekPlan = useCallback((weekStart, plan) => {
+    setMyWeekPlans((prev) => {
+      const next = { ...prev, [weekStart]: { plan } };
+      saveStored("pe_my_week_plans", next);
       return next;
     });
   }, []);
@@ -2865,6 +3295,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
         {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
+        {tab === "plan" && <MyWeekPlanScreen profile={profile} myWeekPlans={myWeekPlans} updateMyWeekPlan={updateMyWeekPlan} updateCart={updateCart} onViewRecipe={viewRecipe} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
         {tab === "shopping" && <ShoppingListScreen cart={cart} profile={profile} checkedItems={checkedItems} toggleChecked={toggleChecked} clearChecks={clearChecks} onArchive={archiveOrder} hiddenItems={hiddenItems} onClearTicked={clearTicked} />}
       </div>

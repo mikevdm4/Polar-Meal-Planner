@@ -95,3 +95,29 @@ export function scaledMacros(item, target) {
     usesFixedProtein, proteinTargetEquivalent, usesFixedCarb, carbTargetEquivalent,
   };
 }
+
+export function fixedMacros(item) {
+  const protein = (item.g1 * item.protein1) / 100 + (item.food2 ? (item.g2 * item.protein2) / 100 : 0);
+  const carbs = (item.g1 * item.carb1) / 100 + (item.food2 ? (item.g2 * item.carb2) / 100 : 0);
+  const calories = (item.g1 * item.kcal1) / 100 + (item.food2 ? (item.g2 * item.kcal2) / 100 : 0);
+  const fat = (item.g1 * (item.fat1 || 0)) / 100 + (item.food2 ? (item.g2 * (item.fat2 || 0)) / 100 : 0);
+  return { protein, carbs, calories, fat };
+}
+
+// Looks up a recipe by name+section from RECIPE_DATA and returns its macros
+// in a consistent shape, whether it's a scaled recipe (Breakfast/Lunch/Dinner)
+// or a fixed-portion one (Snacks/Desserts/Smoothies/etc) — used anywhere a
+// picked recipe's macros need computing without caring which kind it is.
+export function recipeMacros(recipeData, section, name, targets) {
+  const sectionData = recipeData.sections[section];
+  if (!sectionData) return null;
+  const item = sectionData.items.find((i) => i.name === name);
+  if (!item) return null;
+  if (sectionData.type === "fixed") {
+    const m = fixedMacros(item);
+    return { calories: m.calories, protein: m.protein, carbs: m.carbs, fat: m.fat };
+  }
+  const target = mealTarget(section, targets);
+  const m = scaledMacros(item, target);
+  return { calories: m.calories, protein: m.proteinG, carbs: m.carbG, fat: m.fat };
+}
