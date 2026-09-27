@@ -1584,7 +1584,10 @@ async function searchPackagedProducts(query) {
 
 function BarcodeScannerModal({ onScan, onClose }) {
   const scannerRef = useRef(null);
+  const startedRef = useRef(false);
   const [error, setError] = useState("");
+  const [found, setFound] = useState(false);
+  const [secondsScanning, setSecondsScanning] = useState(0);
 
   useEffect(() => {
     const scanner = new Html5Qrcode("barcode-reader");
@@ -1594,17 +1597,36 @@ function BarcodeScannerModal({ onScan, onClose }) {
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 260, height: 160 } },
         (decodedText) => {
-          scanner.stop().catch(() => {});
-          onScan(decodedText);
+          if (found) return; // ignore any further detections once we've already caught one
+          setFound(true);
+          startedRef.current = false;
+          try { scanner.stop().catch(() => {}); } catch (e) { /* already stopped/never started */ }
+          // Brief, unmissable confirmation before handing off — otherwise the
+          // modal just vanishes instantly and it's genuinely unclear whether
+          // anything happened at all, which is exactly what was being reported.
+          setTimeout(() => onScan(decodedText), 500);
         },
-        () => {} // fires continuously while no code is found — not a real error
+        () => {} // fires continuously while no code is found — not a real error, just "still looking"
       )
+      .then(() => { startedRef.current = true; })
       .catch(() => setError("Couldn't access the camera — check camera permissions for this site."));
 
     return () => {
-      scanner.stop().catch(() => {});
+      if (startedRef.current) {
+        try {
+          scanner.stop().catch(() => {});
+        } catch (e) {
+          // already stopped, or the underlying camera stream is gone — safe to ignore
+        }
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (found || error) return;
+    const timer = setInterval(() => setSecondsScanning((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [found, error]);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#0F1210" }}>
@@ -1612,15 +1634,33 @@ function BarcodeScannerModal({ onScan, onClose }) {
         <span className="text-sm font-semibold text-white">Scan a barcode</span>
         <button className="text-white text-2xl leading-none" onClick={onClose}>×</button>
       </div>
-      <div id="barcode-reader" className="flex-1 mx-4 rounded-xl overflow-hidden" style={{ background: "#000" }} />
+      <div className="flex-1 mx-4 rounded-xl overflow-hidden relative" style={{ background: "#000" }}>
+        <div id="barcode-reader" className="w-full h-full" />
+        {found && (
+          <div className="pe-fadein absolute inset-0 flex flex-col items-center justify-center" style={{ background: "rgba(15,18,16,0.9)" }}>
+            <div className="text-4xl mb-2">✅</div>
+            <div className="text-white text-sm font-semibold">Barcode found!</div>
+            <div className="text-white text-xs opacity-70 mt-1">Looking it up…</div>
+          </div>
+        )}
+        {!found && !error && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "rgba(0,0,0,0.55)" }}>
+            <span className="inline-block w-2 h-2 rounded-full pe-pulse" style={{ background: "#6FA968" }} />
+            <span className="text-white text-xs font-medium">Scanning…</span>
+          </div>
+        )}
+      </div>
       <p className="text-center text-xs text-white opacity-70 p-4">
-        {error || "Line up the barcode inside the frame — it'll scan automatically."}
+        {error ||
+          (secondsScanning > 8
+            ? "Still looking — make sure the barcode is well lit, in focus, and fills the frame. Some barcodes (especially small or curved ones) take a few tries."
+            : "Line up the barcode inside the frame — it'll scan automatically.")}
       </p>
     </div>
   );
 }
 
-function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater }) {
+function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater, quickAction, onQuickActionHandled }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [coachFeedback, setCoachFeedback] = useState({});
   useEffect(() => {
@@ -1697,6 +1737,18 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const manualSectionRef = useRef(null);
+
+  useEffect(() => {
+    if (!quickAction) return;
+    if (quickAction === "scan") {
+      setScannerOpen(true);
+    } else if (quickAction === "manual") {
+      setManualOpen(true);
+      // Give the manual section a moment to render/expand before scrolling to it
+      setTimeout(() => manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    }
+    onQuickActionHandled?.();
+  }, [quickAction]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scannedProduct, setScannedProduct] = useState(null);
   const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
@@ -2309,7 +2361,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
               </div>
             </div>
             <div className="mb-3 flex gap-2">
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
                 <input
                   type="time"
@@ -2318,7 +2370,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                   onChange={(e) => setManualTime(e.target.value)}
                 />
               </div>
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
                 <select
                   className="pe-input w-full px-2 py-2 text-sm"
@@ -3216,20 +3268,25 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
   );
 }
 
-const TABS = [
+const PRIMARY_TABS = [
   { key: "log", label: "Daily Log", icon: "📊" },
   { key: "browse", label: "Recipes", icon: "🍴" },
   { key: "plan", label: "Plan", icon: "🗓" },
   { key: "gym", label: "Gym", icon: "🏋" },
+];
+const MORE_TABS = [
   { key: "order", label: "Order", icon: "🧺" },
   { key: "shopping", label: "Shop", icon: "🛒" },
   { key: "setup", label: "Setup", icon: "⚙" },
 ];
+const TABS = [...PRIMARY_TABS, ...MORE_TABS];
 
 function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRefresh }) {
   const [ready, setReady] = useState(false);
   const [hasOnboarded, setHasOnboarded] = useState(true); // default true so returning users never briefly see the first-run framing
   const [tab, setTab] = useState("setup");
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [logQuickAction, setLogQuickAction] = useState(null);
   const [profile, setProfileState] = useState(DEFAULT_PROFILE);
   const [cart, setCartState] = useState({});
   const [logsByDate, setLogsByDate] = useState({});
@@ -3496,7 +3553,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
             onProfileRefresh={onProfileRefresh}
           />
         )}
-        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} />}
+        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} quickAction={logQuickAction} onQuickActionHandled={() => setLogQuickAction(null)} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
         {tab === "plan" && <MyWeekPlanScreen profile={profile} myWeekPlans={myWeekPlans} updateMyWeekPlan={updateMyWeekPlan} updateCart={updateCart} onViewRecipe={viewRecipe} />}
@@ -3504,29 +3561,94 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
         {tab === "shopping" && <ShoppingListScreen cart={cart} profile={profile} checkedItems={checkedItems} toggleChecked={toggleChecked} clearChecks={clearChecks} onArchive={archiveOrder} hiddenItems={hiddenItems} onClearTicked={clearTicked} />}
       </div>
 
+      {moreMenuOpen && (
+        <div
+          className="fixed inset-0 z-30"
+          style={{ background: "rgba(20,64,62,0.15)" }}
+          onClick={() => setMoreMenuOpen(false)}
+        />
+      )}
+
       <div
-        className="fixed bottom-0 left-0 right-0 flex justify-around items-center py-2 px-2"
+        className="fixed left-0 right-0 z-40 pe-fadein"
+        style={{
+          bottom: moreMenuOpen ? "68px" : "-420px",
+          maxWidth: "480px", margin: "0 auto", padding: "0 12px",
+          transition: "bottom 0.2s ease",
+        }}
+      >
+        <div className="rounded-2xl overflow-hidden mb-2" style={{ background: "#fff", border: "1px solid #E4E1D6", boxShadow: "0 -4px 20px rgba(0,0,0,0.1)" }}>
+          <button
+            className="w-full flex items-center gap-3 px-4 py-3 text-left"
+            style={{ borderBottom: "1px solid #E4E1D6", color: "#40473F" }}
+            onClick={() => { setTab("log"); setLogQuickAction("scan"); setMoreMenuOpen(false); }}
+          >
+            <span className="text-lg">📷</span>
+            <span className="text-sm font-semibold flex-1">Scan a barcode</span>
+          </button>
+          <button
+            className="w-full flex items-center gap-3 px-4 py-3 text-left"
+            style={{ color: "#40473F" }}
+            onClick={() => { setTab("log"); setLogQuickAction("manual"); setMoreMenuOpen(false); }}
+          >
+            <span className="text-lg">✏️</span>
+            <span className="text-sm font-semibold flex-1">Manual food entry</span>
+          </button>
+        </div>
+        <div className="rounded-2xl overflow-hidden" style={{ background: "#fff", border: "1px solid #E4E1D6", boxShadow: "0 -4px 20px rgba(0,0,0,0.1)" }}>
+          {MORE_TABS.map((t, i) => (
+            <button
+              key={t.key}
+              className="w-full flex items-center gap-3 px-4 py-3 text-left"
+              style={{ borderBottom: i < MORE_TABS.length - 1 ? "1px solid #E4E1D6" : "none", color: tab === t.key ? "#14403E" : "#40473F" }}
+              onClick={() => { setTab(t.key); setMoreMenuOpen(false); }}
+            >
+              <span className="text-lg">{t.icon}</span>
+              <span className="text-sm font-semibold flex-1">{t.label}</span>
+              {t.key === "order" && cartCount > 0 && (
+                <span
+                  className="pe-mono text-[11px] font-bold text-white rounded-full flex items-center justify-center"
+                  style={{ background: "#B5652F", minWidth: 18, height: 18, padding: "0 4px" }}
+                >
+                  {cartCount}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        className="fixed bottom-0 left-0 right-0 flex justify-around items-center py-2 px-2 z-40"
         style={{ background: "#FFFFFF", borderTop: "1px solid #E4E1D6", maxWidth: "100vw" }}
       >
-        {TABS.map((t) => (
+        {PRIMARY_TABS.map((t) => (
           <button
             key={t.key}
             className="flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl relative"
             style={{ color: tab === t.key ? "#14403E" : "#948A78" }}
-            onClick={() => setTab(t.key)}
+            onClick={() => { setTab(t.key); setMoreMenuOpen(false); }}
           >
             <span className="text-lg leading-none">{t.icon}</span>
             <span className="text-[10px] font-semibold">{t.label}</span>
-            {t.key === "order" && cartCount > 0 && (
-              <span
-                className="absolute -top-0.5 right-1.5 pe-mono text-[9px] font-bold text-white rounded-full flex items-center justify-center"
-                style={{ background: "#B5652F", minWidth: 15, height: 15, padding: "0 3px" }}
-              >
-                {cartCount}
-              </span>
-            )}
           </button>
         ))}
+        <button
+          className="flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl relative"
+          style={{ color: moreMenuOpen || MORE_TABS.some((t) => t.key === tab) ? "#14403E" : "#948A78" }}
+          onClick={() => setMoreMenuOpen((v) => !v)}
+        >
+          <span className="text-lg leading-none">{moreMenuOpen ? "✕" : "➕"}</span>
+          <span className="text-[10px] font-semibold">More</span>
+          {cartCount > 0 && (
+            <span
+              className="absolute -top-0.5 right-1.5 pe-mono text-[9px] font-bold text-white rounded-full flex items-center justify-center"
+              style={{ background: "#B5652F", minWidth: 15, height: 15, padding: "0 3px" }}
+            >
+              {cartCount}
+            </span>
+          )}
+        </button>
       </div>
     </div>
   );
