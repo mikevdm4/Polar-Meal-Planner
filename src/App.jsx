@@ -93,6 +93,23 @@ function round(n) {
   return Math.round(n || 0);
 }
 
+// The "Also:" line under a recipe's tracked ingredients is meant for genuine
+// extra flavour notes (garnish, a squeeze of something) — not to repeat an
+// ingredient that's already listed above with a real quantity. This strips
+// out any vegText segment that's really just restating an already-tracked
+// extra, so "Avocado — 60g" doesn't get followed by a confusing, seemingly
+// untracked "Also: ½ avocado" right underneath it.
+function filterRedundantVegText(vegText, extras) {
+  if (!vegText) return "";
+  const trackedNames = (extras || []).map((e) => e.food.toLowerCase().split(",")[0].split("(")[0].trim());
+  const segments = vegText.split(",").map((s) => s.trim()).filter(Boolean);
+  const kept = segments.filter((seg) => {
+    const segLower = seg.toLowerCase();
+    return !trackedNames.some((name) => name && (segLower.includes(name) || name.includes(segLower)));
+  });
+  return kept.join(", ");
+}
+
 // ---------- storage helpers ----------
 // Persisted storage — real localStorage for a standalone deployment
 // (the Claude-artifact `window.storage` API isn't available outside claude.ai).
@@ -959,16 +976,22 @@ function TrendsChart({ logsByDate, targets }) {
   );
 }
 
-function ProgressBar({ label, consumed, target, unit, color }) {
+function ProgressBar({ label, consumed, target, unit, color, onClick, active }) {
   const pct = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
   const rawPct = target > 0 ? Math.round((consumed / target) * 100) : 0;
   const over = consumed > target;
   const barColor = color || "#14403E";
+  const Wrapper = onClick ? "button" : "div";
   return (
-    <div className="mb-3">
+    <Wrapper
+      className="mb-3 w-full text-left"
+      onClick={onClick}
+      style={onClick ? { cursor: "pointer" } : undefined}
+    >
       <div className="flex justify-between items-baseline mb-1">
-        <span className="text-sm font-semibold" style={{ color: "#14403E" }}>
+        <span className="text-sm font-semibold flex items-center gap-1" style={{ color: "#14403E" }}>
           {label} <span className="text-xs font-normal pe-mono" style={{ color: "#948A78" }}>- {round(consumed)} / {round(target)}{unit}</span>
+          {onClick && <span className="text-[10px]" style={{ color: active ? "#14403E" : "#B8B2A0" }}>{active ? "▲" : "▼"}</span>}
         </span>
         <span className="pe-mono text-xs font-semibold" style={{ color: over ? "#B5652F" : "#948A78" }}>
           {over && <span>over by {round(consumed - target)}{unit} · </span>}
@@ -981,7 +1004,7 @@ function ProgressBar({ label, consumed, target, unit, color }) {
           style={{ width: `${pct}%`, background: over ? "#B5652F" : barColor, transition: "width 0.2s ease" }}
         />
       </div>
-    </div>
+    </Wrapper>
   );
 }
 
@@ -993,6 +1016,8 @@ function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+
+const MEAL_TYPE_OPTIONS = ["Breakfast", "Lunch", "Dinner", "Snack", "Dessert"];
 
 function nowTimeStr() {
   const d = new Date();
@@ -1605,6 +1630,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [pendingFood, setPendingFood] = useState(null);
   const [pendingGrams, setPendingGrams] = useState(100);
   const [pendingTime, setPendingTime] = useState(() => nowTimeStr());
+  const [pendingMealType, setPendingMealType] = useState("Snack");
   const [manualOpen, setManualOpen] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualCal, setManualCal] = useState("");
@@ -1612,6 +1638,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [manualCarbs, setManualCarbs] = useState("");
   const [manualFat, setManualFat] = useState("");
   const [manualTime, setManualTime] = useState(() => nowTimeStr());
+  const [manualMealType, setManualMealType] = useState("Snack");
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
   const dayLog = logsByDate[selectedDate] || [];
@@ -1638,6 +1665,20 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   }, [dayLog]);
 
   const [macroView, setMacroView] = useState("today");
+  const [selectedMacro, setSelectedMacro] = useState(null); // "calories" | "protein" | "carbs" | "fat" | null
+
+  const macroBreakdown = useMemo(() => {
+    if (!selectedMacro || macroView !== "today") return [];
+    const rows = dayLog.map((entry) => {
+      const m = entryMacros(entry);
+      const name = entry.type === "food" ? entry.food.name : entry.name;
+      return { id: entry.id, name, mealType: entry.mealType || entry.section, value: m[selectedMacro] };
+    }).filter((r) => r.value > 0);
+    const dayTotal = rows.reduce((sum, r) => sum + r.value, 0);
+    return rows
+      .map((r) => ({ ...r, pct: dayTotal > 0 ? Math.round((r.value / dayTotal) * 100) : 0 }))
+      .sort((a, b) => b.value - a.value);
+  }, [selectedMacro, macroView, dayLog]);
 
   const weekAvg = useMemo(() => {
     const sum = { calories: 0, protein: 0, carbs: 0, fat: 0 };
@@ -1654,11 +1695,15 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   }, [logsByDate]);
 
   const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const manualSectionRef = useRef(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scannedProduct, setScannedProduct] = useState(null);
   const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
   const [scanError, setScanError] = useState("");
   const [scannedGrams, setScannedGrams] = useState(100);
+  const [scannedTime, setScannedTime] = useState(() => nowTimeStr());
+  const [scannedMealType, setScannedMealType] = useState("Snack");
 
   const [packagedSearchOpen, setPackagedSearchOpen] = useState(false);
   const [packagedQuery, setPackagedQuery] = useState("");
@@ -1690,6 +1735,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       const product = await lookupBarcode(barcode);
       setScannedProduct(product);
       setScannedGrams(100);
+      setScannedTime(nowTimeStr());
       setScanStatus("");
     } catch (e) {
       setScanStatus("error");
@@ -1706,7 +1752,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         food: { name: scannedProduct.brand ? `${scannedProduct.name} (${scannedProduct.brand})` : scannedProduct.name,
                 kcal: scannedProduct.kcal, protein: scannedProduct.protein, carb: scannedProduct.carb, fat: scannedProduct.fat },
         grams: Number(scannedGrams) || 100,
-        time: nowTimeStr(),
+        time: scannedTime,
+        mealType: scannedMealType,
       },
     ]);
     setScannedProduct(null);
@@ -1719,7 +1766,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         selectedDate,
         dayLog.map((e) =>
           e.id === editingFoodEntryId
-            ? { ...e, food: pendingFood, grams: Number(pendingGrams), time: pendingTime }
+            ? { ...e, food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType }
             : e
         )
       );
@@ -1727,7 +1774,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     } else {
       updateDayLog(selectedDate, [
         ...dayLog,
-        { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams), time: pendingTime },
+        { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType },
       ]);
     }
     setPendingFood(null);
@@ -1741,6 +1788,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     setQuery(entry.food.name);
     setPendingGrams(entry.grams);
     setPendingTime(entry.time || nowTimeStr());
+    setPendingMealType(entry.mealType || "Snack");
     setEditingFoodEntryId(entry.id);
   };
 
@@ -1763,6 +1811,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       carbs: Number(manualCarbs) || 0,
       fat: Number(manualFat) || 0,
       time: manualTime,
+      mealType: manualMealType,
       quantified: hasNumbers,
     };
     if (editingEntryId) {
@@ -1783,12 +1832,13 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     setManualCarbs(entry.carbs ? String(entry.carbs) : "");
     setManualFat(entry.fat ? String(entry.fat) : "");
     setManualTime(entry.time || nowTimeStr());
+    setManualMealType(entry.mealType || "Snack");
     setEditingEntryId(entry.id);
     setManualOpen(true);
   };
 
   const exportLogCSV = () => {
-    const rows = [["Date", "Time", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Water (glasses)", "Day notes"]];
+    const rows = [["Date", "Time", "Meal", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Water (glasses)", "Day notes"]];
     const dates = Object.keys(logsByDate).sort();
     dates.forEach((date) => {
       const entries = logsByDate[date] || [];
@@ -1796,7 +1846,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       const water = waterByDate?.[date];
       if (entries.length === 0 && !notes && !water) return;
       if (entries.length === 0) {
-        rows.push([date, "", "", "", "", "", "", "", "", water || "", notes]);
+        rows.push([date, "", "", "", "", "", "", "", "", "", water || "", notes]);
         return;
       }
       entries.forEach((entry, i) => {
@@ -1808,7 +1858,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
           `${entry.servings || 1}x serving`;
         const notYetQuantified = entry.type === "manual" && entry.quantified === false;
         rows.push([
-          date, entry.time || "", entry.type, name, qty,
+          date, entry.time || "", entry.mealType || entry.section || "", entry.type, name, qty,
           notYetQuantified ? "not yet quantified" : round(m.calories),
           notYetQuantified ? "" : round(m.protein),
           notYetQuantified ? "" : round(m.carbs),
@@ -1837,13 +1887,42 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       )}
       <div className="flex items-center justify-between mb-1">
         <h2 className="pe-display text-xl font-semibold" style={{ color: "#14403E" }}>Daily log</h2>
-        <button
-          className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
-          onClick={exportLogCSV}
-          title="Download your entire food log history as a spreadsheet (opens in Excel)"
-        >
-          ⬇ Export
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <button
+              className="w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold"
+              style={{ background: "#14403E", color: "#fff" }}
+              onClick={() => setQuickAddOpen((v) => !v)}
+              title="Quick add"
+            >
+              +
+            </button>
+            {quickAddOpen && (
+              <div className="pe-fadein absolute right-0 top-10 z-20 rounded-lg overflow-hidden" style={{ background: "#fff", border: "1px solid #E4E1D6", minWidth: "180px", boxShadow: "0 4px 16px rgba(0,0,0,0.12)" }}>
+                <button
+                  className="w-full text-left px-4 py-3 text-sm font-medium block"
+                  style={{ borderBottom: "1px solid #E4E1D6" }}
+                  onClick={() => { setQuickAddOpen(false); setScannerOpen(true); }}
+                >
+                  📷 Scan a barcode
+                </button>
+                <button
+                  className="w-full text-left px-4 py-3 text-sm font-medium block"
+                  onClick={() => { setQuickAddOpen(false); setManualOpen(true); manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                >
+                  ✏️ Manual entry
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+            onClick={exportLogCSV}
+            title="Download your entire food log history as a spreadsheet (opens in Excel)"
+          >
+            ⬇ Export
+          </button>
+        </div>
       </div>
       <p className="text-xs mb-4" style={{ color: "#948A78" }}>
         Log meals or individual foods and see them stack up against your daily target. Each day is saved separately.
@@ -1907,14 +1986,57 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
             This week (daily average)
           </button>
         </div>
-        <ProgressBar label="Energy" consumed={macroView === "today" ? totals.calories : weekAvg.calories} target={targets.calories} unit=" kcal" color="#E08D52" />
-        <ProgressBar label="Protein" consumed={macroView === "today" ? totals.protein : weekAvg.protein} target={targets.protein} unit="g" color="#6FA968" />
-        <ProgressBar label="Net Carbs" consumed={macroView === "today" ? totals.carbs : weekAvg.carbs} target={targets.carbs} unit="g" color="#4FA3AC" />
-        <ProgressBar label="Fat" consumed={macroView === "today" ? totals.fat : weekAvg.fat} target={targets.fat} unit="g" color="#A67FC0" />
+        <ProgressBar
+          label="Energy" consumed={macroView === "today" ? totals.calories : weekAvg.calories} target={targets.calories} unit=" kcal" color="#E08D52"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "calories" ? null : "calories") : undefined}
+          active={selectedMacro === "calories"}
+        />
+        <ProgressBar
+          label="Protein" consumed={macroView === "today" ? totals.protein : weekAvg.protein} target={targets.protein} unit="g" color="#6FA968"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "protein" ? null : "protein") : undefined}
+          active={selectedMacro === "protein"}
+        />
+        <ProgressBar
+          label="Net Carbs" consumed={macroView === "today" ? totals.carbs : weekAvg.carbs} target={targets.carbs} unit="g" color="#4FA3AC"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "carbs" ? null : "carbs") : undefined}
+          active={selectedMacro === "carbs"}
+        />
+        <ProgressBar
+          label="Fat" consumed={macroView === "today" ? totals.fat : weekAvg.fat} target={targets.fat} unit="g" color="#A67FC0"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "fat" ? null : "fat") : undefined}
+          active={selectedMacro === "fat"}
+        />
         {macroView === "week" && (
           <p className="text-[11px] mt-1" style={{ color: "#948A78" }}>
             Averaged across the last 7 days (days with nothing logged count as zero).
           </p>
+        )}
+        {macroView === "today" && !selectedMacro && (
+          <p className="text-[11px] mt-1" style={{ color: "#948A78" }}>
+            Tap any bar above to see which meals or items it's coming from.
+          </p>
+        )}
+        {selectedMacro && macroBreakdown.length > 0 && (
+          <div className="pe-fadein mt-3 pt-3" style={{ borderTop: "1px solid #E4E1D6" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "#14403E" }}>
+              Where today's {selectedMacro === "calories" ? "energy" : selectedMacro === "carbs" ? "carbs" : selectedMacro} is coming from
+            </div>
+            {macroBreakdown.map((row) => (
+              <div key={row.id} className="mb-1.5">
+                <div className="flex justify-between text-xs mb-0.5">
+                  <span style={{ color: "#40473F" }}>
+                    {row.name}{row.mealType ? <span style={{ color: "#948A78" }}> · {row.mealType}</span> : null}
+                  </span>
+                  <span className="pe-mono" style={{ color: "#948A78" }}>
+                    {round(row.value)}{selectedMacro === "calories" ? " kcal" : "g"} · {row.pct}%
+                  </span>
+                </div>
+                <div className="w-full rounded-full" style={{ background: "#E9E5D8", height: "4px" }}>
+                  <div className="rounded-full" style={{ width: `${row.pct}%`, background: "#B8B2A0", height: "4px" }} />
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
@@ -2018,7 +2140,21 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         )}
         {scanStatus === "error" && (
           <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
-            {scanError}
+            <p className="mb-2">{scanError}</p>
+            <div className="flex gap-2">
+              <button
+                className="text-xs font-semibold underline"
+                onClick={() => { setScanStatus(""); setScannerOpen(true); }}
+              >
+                Try scanning again
+              </button>
+              <button
+                className="text-xs font-semibold underline"
+                onClick={() => { setScanStatus(""); setManualOpen(true); }}
+              >
+                Log manually instead
+              </button>
+            </div>
           </div>
         )}
         {scannedProduct && (
@@ -2027,7 +2163,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
             <div className="text-xs mb-2" style={{ color: "#948A78" }}>
               Per 100g: {scannedProduct.kcal} kcal · P{scannedProduct.protein} C{scannedProduct.carb} F{scannedProduct.fat}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 mb-2">
               <input
                 type="number"
                 className="pe-input flex-1 px-3 py-2 text-sm"
@@ -2035,6 +2171,21 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 onChange={(e) => setScannedGrams(e.target.value)}
               />
               <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+              <input
+                type="time"
+                className="pe-input px-2 py-2 text-sm"
+                value={scannedTime}
+                onChange={(e) => setScannedTime(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                className="pe-input flex-1 px-2 py-2 text-sm"
+                value={scannedMealType}
+                onChange={(e) => setScannedMealType(e.target.value)}
+              >
+                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
               <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
                 Add
               </button>
@@ -2075,38 +2226,49 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         )}
 
         {pendingFood && (
-          <div className="pe-fadein flex items-center gap-2 mb-2">
-            <input
-              type="number"
-              className="pe-input flex-1 px-3 py-2 text-sm"
-              value={pendingGrams}
-              onChange={(e) => setPendingGrams(e.target.value)}
-              placeholder="grams"
-            />
-            <span className="text-xs" style={{ color: "#948A78" }}>g</span>
-            <input
-              type="time"
-              className="pe-input px-2 py-2 text-sm"
-              value={pendingTime}
-              onChange={(e) => setPendingTime(e.target.value)}
-            />
-            <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
-              {editingFoodEntryId ? "Save" : "Add"}
-            </button>
-            {editingFoodEntryId && (
-              <button
-                className="text-xs font-medium"
-                style={{ color: "#948A78" }}
-                onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams(100); setEditingFoodEntryId(null); }}
+          <div className="pe-fadein mb-2">
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="number"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                value={pendingGrams}
+                onChange={(e) => setPendingGrams(e.target.value)}
+                placeholder="grams"
+              />
+              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+              <input
+                type="time"
+                className="pe-input px-2 py-2 text-sm"
+                value={pendingTime}
+                onChange={(e) => setPendingTime(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                className="pe-input flex-1 px-2 py-2 text-sm"
+                value={pendingMealType}
+                onChange={(e) => setPendingMealType(e.target.value)}
               >
-                Cancel
+                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
+                {editingFoodEntryId ? "Save" : "Add"}
               </button>
-            )}
+              {editingFoodEntryId && (
+                <button
+                  className="text-xs font-medium"
+                  style={{ color: "#948A78" }}
+                  onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams(100); setEditingFoodEntryId(null); }}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      <div className="pe-card p-4 mb-4">
+      <div className="pe-card p-4 mb-4" ref={manualSectionRef}>
         <button
           className="flex items-center justify-between w-full"
           onClick={() => setManualOpen((o) => !o)}
@@ -2146,14 +2308,26 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
               </div>
             </div>
-            <div className="mb-3">
-              <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
-              <input
-                type="time"
-                className="pe-input px-2 py-2 text-sm"
-                value={manualTime}
-                onChange={(e) => setManualTime(e.target.value)}
-              />
+            <div className="mb-3 flex gap-2">
+              <div className="flex-1">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
+                <input
+                  type="time"
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={manualTime}
+                  onChange={(e) => setManualTime(e.target.value)}
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
+                <select
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={manualMealType}
+                  onChange={(e) => setManualMealType(e.target.value)}
+                >
+                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
             </div>
             <p className="text-[11px] mb-3" style={{ color: "#948A78" }}>
               Just tracking what you ate for now? Leave the numbers blank and add them later — useful if you're
@@ -2224,6 +2398,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                     {entry.type === "manual" && entry.quantified === false ? (
                       <div className="flex items-center gap-2 mt-0.5">
                         <span className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                          {entry.mealType && `${entry.mealType} · `}
                           {entry.time && `${entry.time} · `}not yet quantified
                         </span>
                         <button
@@ -2236,6 +2411,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                       </div>
                     ) : (
                       <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                        {entry.mealType && `${entry.mealType} · `}
                         {entry.time && `${entry.time} · `}
                         {entry.type === "food" && `${entry.grams}g · `}
                         {entry.type === "manual" && "manual entry · "}
@@ -2359,8 +2535,8 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
                 {(item.extras || []).map((e, i) => (
                   <li key={i}>{e.food} — {round(e.grams)}g</li>
                 ))}
-                {item.vegText && (
-                  <li className="text-[12px]" style={{ color: "#948A78" }}>Also: {item.vegText}</li>
+                {filterRedundantVegText(item.vegText, item.extras) && (
+                  <li className="text-[12px]" style={{ color: "#948A78" }}>Also: {filterRedundantVegText(item.vegText, item.extras)}</li>
                 )}
               </>
             )}
@@ -2460,6 +2636,7 @@ const BROWSE_TABS = [...SECTION_ORDER, ALL_KEY];
 function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) {
   const [section, setSection] = useState(jumpTarget ? jumpTarget.section : "Breakfast");
   const [search, setSearch] = useState(jumpTarget ? jumpTarget.name : "");
+  const [ingredientTypeahead, setIngredientTypeahead] = useState("");
   const [veggieOnly, setVeggieOnly] = useState(false);
   const [glutenFreeOnly, setGlutenFreeOnly] = useState(false);
   const [dairyFreeOnly, setDairyFreeOnly] = useState(false);
@@ -2535,7 +2712,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
       .filter((x) => !veggieOnly || x.veggie)
       .filter((x) => !glutenFreeOnly || isGlutenFree(x.item, x.isFixed))
       .filter((x) => !dairyFreeOnly || isDairyFree(x.item, x.isFixed))
-      .filter((x) => !recoveryDayOnly || x.item.recoveryDay)
+      .filter((x) => (recoveryDayOnly ? x.item.recoveryDay : !x.item.recoveryDay))
       .filter((x) => matchesTimeFilter(x.item, x.isFixed))
       .filter((x) => itemMatchesSearch(x, search));
   }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, recoveryDayOnly, search, timeFilter]);
@@ -2621,6 +2798,33 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
           ))}
         </div>
         <div className="px-4 pb-3">
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              className="pe-input flex-1 px-3 py-2 text-sm"
+              placeholder="...or type your own ingredient (e.g. strawberry)"
+              value={ingredientTypeahead}
+              onChange={(e) => setIngredientTypeahead(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && ingredientTypeahead.trim()) {
+                  setSearch(ingredientTypeahead.trim());
+                  setSection(ALL_KEY);
+                  setExpandedKey(null);
+                }
+              }}
+            />
+            <button
+              className="pe-btn-secondary px-4 py-2 rounded-full text-xs font-semibold"
+              onClick={() => {
+                if (!ingredientTypeahead.trim()) return;
+                setSearch(ingredientTypeahead.trim());
+                setSection(ALL_KEY);
+                setExpandedKey(null);
+              }}
+            >
+              Search
+            </button>
+          </div>
           <select
             className="pe-input w-full px-3 py-2 text-sm"
             value=""
@@ -2631,7 +2835,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
               setExpandedKey(null);
             }}
           >
-            <option value="">Tired and don't know what to cook? Pick an ingredient…</option>
+            <option value="">...or pick from a common ingredient list</option>
             {Object.entries(INGREDIENT_GROUPS).map(([groupLabel, names]) => (
               <optgroup key={groupLabel} label={groupLabel}>
                 {names.map((n) => (
