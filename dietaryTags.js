@@ -53,7 +53,8 @@ export const DAIRY_SUBS = {
 
 function componentsOf(item, isFixed) {
   if (isFixed) return [item.food1, item.food2].filter(Boolean);
-  return [item.proteinFood, item.carbFood, item.vegFood].filter(Boolean);
+  const extrasFoods = (item.extras || []).map((e) => e.food);
+  return [item.proteinFood, item.carbFood, ...extrasFoods].filter(Boolean);
 }
 
 export function isGlutenFree(item, isFixed) {

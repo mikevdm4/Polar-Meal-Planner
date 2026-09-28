@@ -56,13 +56,33 @@ export async function pushUserData(userId) {
 }
 
 let pushTimer = null;
+let lastFailedUserId = null;
+
+// If a push failed (most likely because the device was offline), retry the
+// moment the browser regains connectivity — otherwise that data only syncs
+// on the next unrelated change, which may never come.
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    if (lastFailedUserId) {
+      const userId = lastFailedUserId;
+      pushUserData(userId)
+        .then(() => { lastFailedUserId = null; })
+        .catch(() => { lastFailedUserId = userId; });
+    }
+  });
+}
+
 export function schedulePushUserData(userId, delayMs = 1500) {
   if (!userId) return;
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(() => {
-    pushUserData(userId).catch(() => {
-      // Background sync failure is non-fatal — localStorage already has
-      // the authoritative local copy, and the next save retries.
-    });
+    pushUserData(userId)
+      .then(() => { lastFailedUserId = null; })
+      .catch(() => {
+        // Local storage already holds the authoritative copy — nothing is
+        // lost — but remember this so the "online" listener above can
+        // retry automatically once connectivity returns.
+        lastFailedUserId = userId;
+      });
   }, delayMs);
 }

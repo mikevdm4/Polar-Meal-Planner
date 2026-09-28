@@ -1,15 +1,43 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Html5Qrcode } from "html5-qrcode";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
-import { schedulePushUserData } from "./authSync.js";
-import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
+import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
-import { getMyProfile } from "./auth.js";
+import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail, getMyWeekPlan, getMyFeedback } from "./auth.js";
 import { pullUserData } from "./authSync.js";
-import { AuthScreen, CoachDashboard } from "./Auth.jsx";
+import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
+import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros, fixedMacros, recipeMacros } from "./calculations.js";
+import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
-const STRUCTURES = ["Breakfast, Lunch & Dinner", "Lunch & Dinner", "Meals Only"];
+const STORE_CUPBOARD_ITEMS = [
+  "Olive oil", "Salt", "Black pepper", "Garlic (fresh)", "Onion (fresh, when not tracked as a main ingredient)",
+  "Paprika", "Ground cumin", "Dried oregano", "Dried basil", "Dried thyme", "Chilli flakes",
+  "Curry powder", "Garam masala", "Ground cinnamon", "Vanilla extract",
+  "Balsamic vinegar", "Red wine vinegar", "Soy sauce", "Worcestershire sauce",
+  "Dijon mustard", "Stock cubes or stock", "Plain flour or cornflour", "Baking powder",
+];
+
+function StoreCupboardList({ compact }) {
+  return (
+    <div>
+      {!compact && (
+        <p className="text-xs mb-2" style={{ color: "#948A78" }}>
+          Every recipe assumes you already have these basics at home — they're not added to your shopping list
+          since a bottle of oil or a jar of paprika lasts for dozens of meals, not one. Worth checking your
+          cupboard against this list once, then it's a one-off purchase.
+        </p>
+      )}
+      <ul className={`list-disc list-inside space-y-0.5 ${compact ? "text-[12px]" : "text-sm"}`} style={{ color: "#40473F" }}>
+        {STORE_CUPBOARD_ITEMS.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 const SECTION_ORDER = [
   "Breakfast", "Smoothies", "Granola", "Lunch", "Dinner",
   "Snacks", "Desserts & Sweet Treats", "Pre-Gym & Pre-Run", "Recovery Meals", "Recovery Smoothies",
@@ -35,7 +63,9 @@ const INGREDIENT_GROUPS = (() => {
       } else {
         if (item.proteinFood) proteins.add(item.proteinFood);
         if (item.carbFood) carbs.add(item.carbFood);
-        if (item.vegFood) vegs.add(item.vegFood);
+        (item.extras || []).forEach((e) => {
+          (e.category === "Proteins" ? proteins : e.category === "Vegetables" ? vegs : carbs).add(e.food);
+        });
       }
     });
   });
@@ -45,10 +75,6 @@ const INGREDIENT_GROUPS = (() => {
     Vegetable: [...vegs].sort(),
   };
 })();
-
-const SECTION_MEAL_TYPE = {
-  Breakfast: "Breakfast", Lunch: "Lunch", Dinner: "Dinner", "Recovery Meals": "Recovery",
-};
 
 const DEFAULT_PROFILE = {
   bodyweight: 70,
@@ -60,87 +86,28 @@ const DEFAULT_PROFILE = {
   mealPercents: null, // null = use evidence-based default (even split) for current structure
 };
 
-function defaultMealPercents(structure) {
-  if (structure === STRUCTURES[0]) return { Breakfast: 33, Lunch: 33, Dinner: 34 };
-  if (structure === STRUCTURES[1]) return { Lunch: 50, Dinner: 50 };
-  return {};
-}
 
-function activeMealKeys(structure) {
-  if (structure === STRUCTURES[0]) return ["Breakfast", "Lunch", "Dinner"];
-  if (structure === STRUCTURES[1]) return ["Lunch", "Dinner"];
-  return [];
-}
 
-function computeTargets(profile) {
-  const bw = Number(profile.bodyweight) || 0;
-  const proteinPerKg = profile.goal === "Fat Loss" ? 2.2 : profile.goal === "Maintenance" ? 1.8 : 2.0;
-  const kcalPerKg = profile.goal === "Fat Loss" ? 26 : profile.goal === "Maintenance" ? 31 : 36;
-  const calories = bw * kcalPerKg + (Number(profile.adjustment) || 0);
-  const protein = bw * proteinPerKg;
-  const fat = (calories * 0.35) / 9;
-  const carbs = (calories - protein * 4 - fat * 9) / 4;
-
-  const snackCount = Number(profile.snackCount) || 0;
-  const snackPct = Number(profile.snackPct) || 0;
-  const snackPoolPct = snackCount * snackPct;
-  const mealPoolPct = Math.max(0, 100 - snackPoolPct);
-
-  const keys = activeMealKeys(profile.structure);
-  const mealPercents = profile.mealPercents || defaultMealPercents(profile.structure);
-
-  const perMealByType = {};
-  keys.forEach((k) => {
-    const pct = mealPercents[k] != null ? mealPercents[k] : 100 / keys.length;
-    perMealByType[k] = {
-      protein: (protein * pct) / 100,
-      carbs: (carbs * pct) / 100,
-      pct,
-    };
-  });
-
-  // Legacy shared value (used only by "Meals Only" fallback and the summary card)
-  const mealCount = keys.length || 1;
-  const perMeal = { protein: protein / mealCount, carbs: carbs / mealCount };
-
-  const snackBudget = { protein: (protein * snackPct) / 100, carbs: (carbs * snackPct) / 100, calories: (calories * snackPct) / 100 };
-  const recovery = { protein: bw * 0.35, carbs: bw * 1.1 };
-  return { calories, protein, fat, carbs, perMeal, perMealByType, mealPoolPct, snackPoolPct, snackBudget, recovery, mealCount };
-}
-
-function mealTarget(sectionName, targets) {
-  if (sectionName === "Recovery Meals") return targets.recovery;
-  if (targets.perMealByType && targets.perMealByType[sectionName]) return targets.perMealByType[sectionName];
-  if (SECTION_MEAL_TYPE[sectionName]) return targets.perMeal; // Meals Only fallback
-  return null; // fixed-portion sections don't use bodyweight targets
-}
-
-function scaledMacros(item, target) {
-  const proteinPortion = target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : 0;
-  const carbPortion = target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
-  const proteinG = (proteinPortion * item.proteinPer100) / 100;
-  const carbG = (carbPortion * item.carbPer100) / 100;
-  const calories =
-    (proteinPortion * item.proteinKcalPer100) / 100 +
-    (carbPortion * item.carbKcalPer100) / 100 +
-    (item.vegFood ? (item.vegGrams * item.vegKcalPer100) / 100 : 0);
-  const fat =
-    (proteinPortion * (item.proteinFatPer100 || 0)) / 100 +
-    (carbPortion * (item.carbFatPer100 || 0)) / 100 +
-    (item.vegFood ? (item.vegGrams * (item.vegFatPer100 || 0)) / 100 : 0);
-  return { proteinPortion, carbPortion, proteinG, carbG, calories, fat };
-}
-
-function fixedMacros(item) {
-  const protein = (item.g1 * item.protein1) / 100 + (item.food2 ? (item.g2 * item.protein2) / 100 : 0);
-  const carbs = (item.g1 * item.carb1) / 100 + (item.food2 ? (item.g2 * item.carb2) / 100 : 0);
-  const calories = (item.g1 * item.kcal1) / 100 + (item.food2 ? (item.g2 * item.kcal2) / 100 : 0);
-  const fat = (item.g1 * (item.fat1 || 0)) / 100 + (item.food2 ? (item.g2 * (item.fat2 || 0)) / 100 : 0);
-  return { protein, carbs, calories, fat };
-}
 
 function round(n) {
   return Math.round(n || 0);
+}
+
+// The "Also:" line under a recipe's tracked ingredients is meant for genuine
+// extra flavour notes (garnish, a squeeze of something) — not to repeat an
+// ingredient that's already listed above with a real quantity. This strips
+// out any vegText segment that's really just restating an already-tracked
+// extra, so "Avocado — 60g" doesn't get followed by a confusing, seemingly
+// untracked "Also: ½ avocado" right underneath it.
+function filterRedundantVegText(vegText, extras) {
+  if (!vegText) return "";
+  const trackedNames = (extras || []).map((e) => e.food.toLowerCase().split(",")[0].split("(")[0].trim());
+  const segments = vegText.split(",").map((s) => s.trim()).filter(Boolean);
+  const kept = segments.filter((seg) => {
+    const segLower = seg.toLowerCase();
+    return !trackedNames.some((name) => name && (segLower.includes(name) || name.includes(segLower)));
+  });
+  return kept.join(", ");
 }
 
 // ---------- storage helpers ----------
@@ -175,7 +142,342 @@ function ContourSVG() {
   );
 }
 
-function SetupScreen({ profile, setProfile, userEmail, onSignOut }) {
+function CookingGuideScreen() {
+  const Section = ({ title, children }) => (
+    <div className="pe-card p-4 mb-3">
+      <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>{title}</div>
+      <div className="text-sm space-y-2" style={{ color: "#40473F" }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Cooking Guide</h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        Meal prep strategy, everyday technique, and the small habits that separate an okay plate from a genuinely
+        good one — none of it requires fancy equipment or professional training.
+      </p>
+
+      <Section title="📦 Meal prep — set yourself up for the week">
+        <p><strong>Batch the base, not the whole dish.</strong> Cook a big tray of rice, a batch of roasted
+        vegetables, and a couple of proteins on a Sunday, then mix and match through the week rather than making
+        five identical meals — you'll actually want to eat it on day four.</p>
+        <p><strong>Undercook slightly if you're reheating.</strong> Vegetables and pasta both keep cooking a
+        little in the fridge and again when reheated — pull them off the heat just before they're perfectly done.</p>
+        <p><strong>Cool food fully before sealing it in the fridge.</strong> Sealing something hot traps steam,
+        which means soggy vegetables and a shorter shelf life. Ten minutes uncovered on the counter first makes
+        a real difference.</p>
+        <p><strong>Freeze in portions, not one big block.</strong> A single large frozen block of chilli or
+        curry takes forever to defrost evenly and often overcooks at the edges before the middle's even thawed.
+        Flat bags or individual containers freeze faster and thaw faster too.</p>
+        <p><strong>Dress salads and add crunchy toppings just before eating</strong>, not when you prep — nuts,
+        seeds and anything meant to be crisp will go soft and soggy sitting in the fridge for days.</p>
+      </Section>
+
+      <Section title="🔥 Getting a better sear or golden finish">
+        <p><strong>Pat protein dry before it hits the pan.</strong> Surface moisture steams instead of browning
+        — a couple of minutes with kitchen paper before cooking chicken, steak, or fish makes a genuinely visible
+        difference to colour and crust.</p>
+        <p><strong>Don't move it too soon.</strong> Meat, fish and halloumi all release themselves from the pan
+        naturally once a proper crust has formed. If it's sticking and tearing when you try to flip it, it's
+        not ready yet — give it another minute.</p>
+        <p><strong>Don't overcrowd the pan.</strong> Too much in the pan at once drops the temperature and the
+        food steams rather than sears. Cook in batches if you need to — it's faster in total than one soggy batch.</p>
+        <p><strong>Let meat rest after cooking</strong> — a few minutes for a steak or chicken breast, longer for
+        a bigger cut. Cutting straight in lets all the juice run out onto the board instead of staying in the meat.</p>
+      </Section>
+
+      <Section title="🧂 Seasoning and flavour">
+        <p><strong>Season in layers, not just at the end.</strong> A pinch of salt on the onions as they cook, a
+        bit more when you add the next ingredient, then a final taste-and-adjust at the end — builds far more
+        flavour than one big pinch right before serving.</p>
+        <p><strong>Taste as you go</strong>, genuinely the single most underused habit in home cooking. You can't
+        fix a bland dish once it's on the plate, but you can fix it two minutes before.</p>
+        <p><strong>Acid at the end wakes a dish up.</strong> A squeeze of lemon or a dash of vinegar right before
+        serving, especially on anything rich or a bit flat-tasting, does more than another pinch of salt would.</p>
+        <p><strong>Toast whole or ground spices briefly in the dry pan</strong> before adding wet ingredients —
+        30 seconds over medium heat brings out a noticeably deeper flavour than adding them straight into liquid.</p>
+      </Section>
+
+      <Section title="🍚 Rice, pasta & grains">
+        <p><strong>Salt the water properly</strong> — it should taste like the sea. This is the only chance
+        pasta or rice has to be seasoned from the inside rather than just on the surface.</p>
+        <p><strong>Rinse rice before cooking</strong> (not pasta) — it removes surface starch and gives a
+        fluffier, less clumpy result, especially for basmati.</p>
+        <p><strong>Save a splash of pasta water</strong> before draining — the starchy water helps any sauce
+        cling to the pasta properly instead of pooling at the bottom of the bowl.</p>
+      </Section>
+
+      <Section title="🥦 Vegetables">
+        <p><strong>Roast at a genuinely high heat</strong> (200°C or above) and don't overcrowd the tray — too
+        many vegetables piled together steams them instead of roasting, and you lose the caramelised edges that
+        actually taste good.</p>
+        <p><strong>Cut everything on the tray to a similar size</strong> so it all finishes cooking at the same
+        time, rather than some pieces burning while others are still hard.</p>
+        <p><strong>Don't skip drying vegetables after washing</strong> if you're roasting or stir-frying them —
+        the same steaming problem as with meat.</p>
+      </Section>
+
+      <Section title="🍳 Eggs">
+        <p><strong>Low and slow for scrambled eggs</strong> — a gentle heat and patience gets a genuinely
+        creamier result than blasting them on high, which just makes them rubbery fast.</p>
+        <p><strong>Room-temperature eggs poach and boil more evenly</strong> than eggs straight from the fridge.</p>
+      </Section>
+
+      <Section title="🍲 Sauces & stews">
+        <p><strong>Deglaze the pan.</strong> After browning meat, add a splash of stock, wine, or even water to
+        the same pan and scrape up the browned bits stuck to the bottom — that's genuinely concentrated flavour,
+        not something to wash down the drain.</p>
+        <p><strong>A longer, gentler simmer beats a rushed boil</strong> for almost any stew or curry — flavours
+        have time to actually combine rather than just cooking through.</p>
+        <p><strong>Thin a sauce with pasta water, stock, or a splash of milk</strong> rather than plain water if
+        you need to loosen it — plain water dilutes flavour along with the texture.</p>
+      </Section>
+
+      <Section title="🔪 A few genuinely useful habits">
+        <p><strong>Read the whole recipe before you start cooking</strong>, not just the ingredient list —
+        nothing derails a meal faster than realising step 4 needed something marinating an hour ago.</p>
+        <p><strong>Prep everything before the pan gets hot</strong> (chefs call this mise en place) — chopping
+        an onion while something else is already burning is how most kitchen mistakes happen.</p>
+        <p><strong>A sharp knife is safer than a dull one</strong> — it requires less force and is far less
+        likely to slip.</p>
+        <p><strong>Keep a kitchen towel over your shoulder, not a fresh one for every wipe</strong> — small
+        thing, but it's exactly how professional kitchens stay fast and organised without constant clean-up stops.</p>
+      </Section>
+    </div>
+  );
+}
+
+function HelpGuideScreen({ onGetStarted, isFirstRun }) {
+  const Section = ({ title, children }) => (
+    <div className="pe-card p-4 mb-3">
+      <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>{title}</div>
+      <div className="text-sm space-y-2" style={{ color: "#40473F" }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>
+        {isFirstRun ? "Welcome — here's how this works" : "Help & Guide"}
+      </h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        A quick tour of every part of the app, and what to do if something needs changing.
+      </p>
+
+      <Section title="⚙ Setup — start here">
+        <p>Your bodyweight, goal (Fat Loss / Maintenance / Muscle Gain) and meal structure drive every target in
+        the app. Change your bodyweight here whenever it changes — everything recalculates automatically.</p>
+        <p><strong>Calorie adjustment</strong> lets you nudge your daily calories up or down (e.g. +300 on a
+        heavier training day) without changing your protein target.</p>
+        <p><strong>Meal distribution</strong> — by default your protein and carbs split evenly across your meals.
+        Drag the sliders if you want a bigger breakfast and a lighter dinner, say, or add snacks that each claim
+        a % of your day.</p>
+        <p><strong>Coach</strong> — link, switch, or remove your coach's account at any time by entering their
+        email, even if you skipped this when you signed up.</p>
+        <p><strong>Password & Email</strong> — change either directly here; an email change needs confirming via
+        a link sent to the new address before it takes effect.</p>
+        <p>The <strong>🔪 Cooking Guide</strong>, right below Help & Guide, is worth a look separately — meal
+        prep strategy and everyday technique (searing, seasoning, roasting) rather than how the app works.</p>
+      </Section>
+
+      <Section title="🍽 Recipes — browsing and filtering">
+        <p>Search by recipe name, or by an ingredient (e.g. "chicken" finds every recipe using chicken as the
+        main protein). The dropdown under the search box — "Tired and don't know what to cook?" — lets you pick
+        an ingredient and see everything that uses it.</p>
+        <p><strong>Filters:</strong> Veggie only, Gluten-free, Dairy-free, and 🔥 Recovery day (bigger, tastier,
+        less calorie-conscious meals for after a big session) can be combined. A "✕ Reset all" chip appears once
+        any filter or search is active.</p>
+        <p>Tap a recipe to expand it — you'll see the exact quantity of every tracked ingredient, a "Dietary
+        swaps" section if it's easy to make gluten- or dairy-free, and the full method. "Plus: oil, salt, spices —
+        see Store Cupboard" is tappable and shows the basics every recipe assumes you already have.</p>
+      </Section>
+
+      <Section title="💪 Gym — before and after training">
+        <p>Toggle between "Before training" (quick, easy-to-digest snacks) and "After training" (recovery meals
+        and smoothies, scaled to a separate post-workout target). Adding something here logs it straight to
+        today's Daily Log.</p>
+      </Section>
+
+      <Section title="🛒 Order & Shopping">
+        <p>Add recipes to your order from the Recipes or Gym tabs, then head to Shopping for the combined
+        ingredient list, grouped and totalled. Tick items off as you shop — "Clear ticked" removes just what
+        you've bought (handy for a second trip), "Clear all" archives the whole order to Past Orders and starts
+        fresh.</p>
+        <p>Past Orders can be reordered in one tap, or viewed without changing your current cart.</p>
+      </Section>
+
+      <Section title="📋 Daily Log — tracking what you actually eat">
+        <p>Three ways to log something: <strong>Add a meal</strong> (pick a recipe, adjust servings, even swap
+        the protein source if you used something different), <strong>Add a food</strong> (search the ingredient
+        database and enter grams), or <strong>Log manually</strong> for anything else — a takeaway, a meal
+        replacement.</p>
+        <p><strong>📷 Scan barcode</strong> and <strong>🔍 Packaged product</strong> both sit above the food
+        search. Scanning opens your camera and looks the product up automatically; the packaged product search
+        is for typing a branded item's name instead (a protein bar, a cereal) when you don't have the packet to
+        hand. Both pull from Open Food Facts, a free, community-maintained database — always worth a glance at
+        the figures before adding, especially for less common products.</p>
+        <p>Logging manually doesn't require the numbers up front — leave calories blank if you just want to
+        record <em>what</em> and <em>when</em> you ate something, and add the nutrition info later by tapping
+        "Add nutrition info" on that entry.</p>
+        <p>The <strong>colour-coded bars</strong> (Energy, Protein, Net Carbs, Fat) update the moment you log
+        something — no refresh needed. Tap <strong>Today / This week</strong> above them to switch between
+        today's numbers and your daily average across the last 7 days.</p>
+        <p>The <strong>💧 Water</strong> tracker sits just below — tap + as you drink a glass through the day.</p>
+        <p>The <strong>"How are you feeling today?"</strong> notes box is there for tracking bloating, energy,
+        digestion, or mood alongside what you ate — useful for spotting patterns over time.</p>
+        <p>If your coach has left you feedback on a specific day, it shows here too — a <strong>"💬 Feedback
+        from your coach"</strong> card appears automatically when you're viewing that date.</p>
+        <p>The <strong>Trends</strong> chart shows your last week or month at a glance, with workout-related
+        nutrition shown in a separate colour from everyday meals.</p>
+        <p>Tap <strong>⬇ Export</strong> at the top to download your entire log history (every day, every entry,
+        every note) as a spreadsheet.</p>
+      </Section>
+
+      <Section title="🗓 Plan — setting your week out ahead of time">
+        <p>Pick a Breakfast, Lunch, Dinner, Snack, and Dessert for each day of the week, up to about a month
+        ahead. Each day shows the same colour-coded macro bars as the Daily Log, so you can see what a day's
+        picks actually add up to before committing to it — genuinely useful for spotting a day that's come out
+        too light or too heavy before you've bought anything.</p>
+        <p><strong>"Copy last week's plan as a starting point"</strong> pulls your previous week's picks into
+        the current one, so you're editing rather than starting from a blank week each time.</p>
+        <p>Once you're happy with a week, <strong>"🧺 Add this week's picks to my order"</strong> puts every
+        picked recipe straight into your cart in one go — head to Shopping afterward for the combined list.</p>
+        <p>If your coach has suggested meals for the week, those show up automatically in your Daily Log as
+        well, separate from your own plan here.</p>
+      </Section>
+
+      <Section title="🔄 Syncing & working offline">
+        <p>Your data saves to this device instantly and syncs to your account automatically — log in on another
+        device and it'll be there. If you're offline, everything still saves locally and syncs the moment you're
+        back online; check the sync status in Setup → Account if you want to confirm.</p>
+      </Section>
+
+      <Section title="🔥 What 'Recovery Day' actually means">
+        <p>Recovery Day recipes (burgers, gyros, real desserts with real sugar and cream) are tagged for days
+        after a big session where you want to genuinely enjoy your food rather than watch every gram. They still
+        include a proper veg or salad base — they're just not built around minimising calories the way the rest
+        of the plan is.</p>
+      </Section>
+
+      <div
+        className="rounded-lg p-4 mt-2"
+        style={{ background: "#FFF7ED", border: "1px solid #F5DCC9" }}
+      >
+        <div className="text-sm font-semibold mb-1.5" style={{ color: "#9C5527" }}>
+          ⚠️ A note on allergens and ingredient accuracy
+        </div>
+        <p className="text-xs mb-2" style={{ color: "#9C5527" }}>
+          This app is <strong>not</strong> built as an allergen-management tool. The Gluten-free and Dairy-free
+          filters are a best-effort guide based on each recipe's main tracked ingredients only — they are{" "}
+          <strong>not verified safe for coeliac disease or a diagnosed food allergy</strong>, and a method step
+          can mention an ingredient (a coating, a dash of sauce, a garnish) that isn't reflected in the filter at
+          all. There is currently no filtering for nuts, shellfish, eggs, or any other allergen.
+        </p>
+        <p className="text-xs" style={{ color: "#9C5527" }}>
+          Nutrition figures (calories, protein, carbs, fat) are calculated from standard ingredient data and are
+          a close estimate, not a laboratory measurement. If you or a client has any allergy, intolerance, or
+          medical dietary requirement, <strong>always independently check every ingredient and full method of
+          any recipe before eating it</strong> — don't rely on this app's filters or figures alone.
+        </p>
+      </div>
+
+      {onGetStarted && (
+        <button
+          className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm mt-4"
+          onClick={onGetStarted}
+        >
+          {isFirstRun ? "Get started →" : "Back"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, isOnline, onOpenGuide, onOpenCookingGuide, currentUserId, coachId, onProfileRefresh }) {
+  const [coachEmailInput, setCoachEmailInput] = useState("");
+  const [coachLinkStatus, setCoachLinkStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [coachLinkError, setCoachLinkError] = useState("");
+
+  const handleLinkCoach = async () => {
+    if (!coachEmailInput.trim()) return;
+    setCoachLinkStatus("saving");
+    setCoachLinkError("");
+    try {
+      await linkCoach(currentUserId, coachEmailInput);
+      setCoachLinkStatus("success");
+      setCoachEmailInput("");
+      if (onProfileRefresh) await onProfileRefresh();
+    } catch (e) {
+      setCoachLinkStatus("error");
+      setCoachLinkError(e.message || "Couldn't link that coach — try again.");
+    }
+  };
+
+  const handleUnlinkCoach = async () => {
+    setCoachLinkStatus("saving");
+    try {
+      await unlinkCoach(currentUserId);
+      setCoachLinkStatus("");
+      if (onProfileRefresh) await onProfileRefresh();
+    } catch (e) {
+      setCoachLinkStatus("error");
+      setCoachLinkError(e.message || "Couldn't remove your coach — try again.");
+    }
+  };
+
+  const [showSecurity, setShowSecurity] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordStatus, setPasswordStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [passwordError, setPasswordError] = useState("");
+
+  const handleChangePassword = async () => {
+    if (newPassword.length < 8) {
+      setPasswordStatus("error");
+      setPasswordError("Password needs to be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordStatus("error");
+      setPasswordError("Those two passwords don't match.");
+      return;
+    }
+    setPasswordStatus("saving");
+    setPasswordError("");
+    try {
+      await changePassword(newPassword);
+      setPasswordStatus("success");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (e) {
+      setPasswordStatus("error");
+      setPasswordError(e.message || "Couldn't change your password — try again.");
+    }
+  };
+
+  const [newEmail, setNewEmail] = useState("");
+  const [emailStatus, setEmailStatus] = useState(""); // "" | "saving" | "error" | "success"
+  const [emailError, setEmailError] = useState("");
+
+  const handleChangeEmail = async () => {
+    if (!newEmail.trim() || !newEmail.includes("@")) {
+      setEmailStatus("error");
+      setEmailError("Enter a valid email address.");
+      return;
+    }
+    setEmailStatus("saving");
+    setEmailError("");
+    try {
+      await changeEmail(newEmail);
+      setEmailStatus("success");
+      setNewEmail("");
+    } catch (e) {
+      setEmailStatus("error");
+      setEmailError(e.message || "Couldn't change your email — try again.");
+    }
+  };
+
   return (
     <div className="pe-fadein max-w-md mx-auto px-5 py-6">
       <h2 className="pe-display text-2xl font-semibold mb-1" style={{ color: "#14403E" }}>Your details</h2>
@@ -232,15 +534,181 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut }) {
 
       <MealDistribution profile={profile} setProfile={setProfile} />
 
+      {onOpenGuide && (
+        <button
+          className="pe-card w-full p-4 mb-3 text-left flex items-center justify-between"
+          onClick={onOpenGuide}
+        >
+          <div>
+            <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>📖 Help & Guide</div>
+            <div className="text-xs mt-0.5" style={{ color: "#948A78" }}>
+              How to use every part of the app, plus a note on allergens and ingredient accuracy
+            </div>
+          </div>
+          <span style={{ color: "#948A78" }}>→</span>
+        </button>
+      )}
+
+      {onOpenCookingGuide && (
+        <button
+          className="pe-card w-full p-4 mb-5 text-left flex items-center justify-between"
+          onClick={onOpenCookingGuide}
+        >
+          <div>
+            <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>🔪 Cooking Guide</div>
+            <div className="text-xs mt-0.5" style={{ color: "#948A78" }}>
+              Meal prep strategy and everyday technique tips — searing, seasoning, roasting, and more
+            </div>
+          </div>
+          <span style={{ color: "#948A78" }}>→</span>
+        </button>
+      )}
+
       <div className="pe-card p-4 mb-5">
         <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>Account</div>
         <p className="text-xs mb-3" style={{ color: "#948A78" }}>
           Signed in as <strong>{userEmail}</strong>. Your data syncs automatically to any device you log into
           with this account.
         </p>
+        <div className="flex items-center gap-1.5 mb-3">
+          <span
+            className="inline-block w-2 h-2 rounded-full"
+            style={{
+              background: !isOnline ? "#B5652F" : syncStatus === "error" ? "#B5652F" : syncStatus === "syncing" ? "#D4A15C" : "#4F6B41",
+            }}
+          />
+          <span className="text-xs" style={{ color: "#6B6355" }}>
+            {!isOnline
+              ? "Offline — will sync automatically once reconnected"
+              : syncStatus === "syncing"
+              ? "Syncing…"
+              : syncStatus === "error"
+              ? "Couldn't sync last change — will retry automatically"
+              : "Synced"}
+          </span>
+        </div>
         <button className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold" onClick={onSignOut}>
           Sign out
         </button>
+      </div>
+
+      <div className="pe-card p-4 mb-5">
+        <div className="pe-display text-sm font-semibold mb-1" style={{ color: "#14403E" }}>Coach</div>
+        {coachId ? (
+          <>
+            <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+              You're currently linked to a coach — they can see your profile, order, and logs.
+            </p>
+            <button
+              className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold"
+              onClick={handleUnlinkCoach}
+              disabled={coachLinkStatus === "saving"}
+            >
+              {coachLinkStatus === "saving" ? "Removing…" : "Remove my coach"}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs mb-3" style={{ color: "#948A78" }}>
+              Not linked to a coach yet. If you didn't add one when you signed up — or want to switch — enter
+              their email below at any time.
+            </p>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="email"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                placeholder="Your coach's email"
+                value={coachEmailInput}
+                onChange={(e) => setCoachEmailInput(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold"
+                onClick={handleLinkCoach}
+                disabled={!coachEmailInput.trim() || coachLinkStatus === "saving"}
+                style={!coachEmailInput.trim() || coachLinkStatus === "saving" ? { opacity: 0.5 } : {}}
+              >
+                {coachLinkStatus === "saving" ? "Linking…" : "Link"}
+              </button>
+            </div>
+          </>
+        )}
+        {coachLinkStatus === "error" && (
+          <p className="text-xs mt-1" style={{ color: "#B5652F" }}>{coachLinkError}</p>
+        )}
+        {coachLinkStatus === "success" && (
+          <p className="text-xs mt-1" style={{ color: "#4F6B41" }}>Linked! Your coach can now see your progress.</p>
+        )}
+      </div>
+
+      <div className="pe-card p-4 mb-5">
+        <button className="flex items-center justify-between w-full" onClick={() => setShowSecurity((v) => !v)}>
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Password & Email</div>
+          <span className="text-xs" style={{ color: "#948A78" }}>{showSecurity ? "Hide ▲" : "Show ▼"}</span>
+        </button>
+
+        {showSecurity && (
+          <div className="pe-fadein mt-4">
+            <div className="mb-5">
+              <div className="text-xs font-semibold mb-1.5" style={{ color: "#40473F" }}>Change password</div>
+              <input
+                type="password"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="New password (min. 8 characters)"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+              <input
+                type="password"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="Confirm new password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold"
+                onClick={handleChangePassword}
+                disabled={passwordStatus === "saving"}
+              >
+                {passwordStatus === "saving" ? "Saving…" : "Update password"}
+              </button>
+              {passwordStatus === "error" && (
+                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{passwordError}</p>
+              )}
+              {passwordStatus === "success" && (
+                <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>Password updated.</p>
+              )}
+            </div>
+
+            <div className="pe-divider pt-4">
+              <div className="text-xs font-semibold mb-1.5" style={{ color: "#40473F" }}>Change email</div>
+              <p className="text-[11px] mb-2" style={{ color: "#948A78" }}>
+                You'll get a confirmation link at the new address — the change only takes effect once you click it.
+              </p>
+              <input
+                type="email"
+                className="pe-input w-full px-3 py-2 text-sm mb-2"
+                placeholder="New email address"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+              />
+              <button
+                className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold"
+                onClick={handleChangeEmail}
+                disabled={emailStatus === "saving"}
+              >
+                {emailStatus === "saving" ? "Saving…" : "Send confirmation link"}
+              </button>
+              {emailStatus === "error" && (
+                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{emailError}</p>
+              )}
+              {emailStatus === "success" && (
+                <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>
+                  Check your new inbox for a confirmation link to finish the change.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <TargetsSummary profile={profile} />
@@ -410,7 +878,9 @@ function TargetsSummary({ profile }) {
 const WORKOUT_LOG_SECTIONS = new Set(["Recovery Meals", "Recovery Smoothies", "Pre-Gym & Pre-Run"]);
 
 function dateStr(d) {
-  return d.toISOString().slice(0, 10);
+  // Same local-date fix as todayStr() — must match it exactly, otherwise the
+  // chart's day boundaries and the log's actual day boundaries drift apart.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function splitDayCalories(entries) {
@@ -506,30 +976,112 @@ function TrendsChart({ logsByDate, targets }) {
   );
 }
 
-function ProgressBar({ label, consumed, target, unit }) {
+function ProgressBar({ label, consumed, target, unit, color, onClick, active }) {
   const pct = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
+  const rawPct = target > 0 ? Math.round((consumed / target) * 100) : 0;
   const over = consumed > target;
+  const barColor = color || "#14403E";
+  const Wrapper = onClick ? "button" : "div";
   return (
-    <div className="mb-3">
+    <Wrapper
+      className="mb-3 w-full text-left"
+      onClick={onClick}
+      style={onClick ? { cursor: "pointer" } : undefined}
+    >
       <div className="flex justify-between items-baseline mb-1">
-        <span className="text-xs font-medium" style={{ color: "#40473F" }}>{label}</span>
-        <span className="pe-mono text-xs" style={{ color: over ? "#B5652F" : "#6B6355" }}>
-          {round(consumed)} / {round(target)}{unit}
-          {over && <span className="font-semibold"> · over by {round(consumed - target)}{unit}</span>}
+        <span className="text-sm font-semibold flex items-center gap-1" style={{ color: "#14403E" }}>
+          {label} <span className="text-xs font-normal pe-mono" style={{ color: "#948A78" }}>- {round(consumed)} / {round(target)}{unit}</span>
+          {onClick && <span className="text-[10px]" style={{ color: active ? "#14403E" : "#B8B2A0" }}>{active ? "▲" : "▼"}</span>}
+        </span>
+        <span className="pe-mono text-xs font-semibold" style={{ color: over ? "#B5652F" : "#948A78" }}>
+          {over && <span>over by {round(consumed - target)}{unit} · </span>}
+          {rawPct}%
         </span>
       </div>
       <div className="w-full rounded-full h-2" style={{ background: "#E9E5D8" }}>
         <div
           className="h-2 rounded-full"
-          style={{ width: `${pct}%`, background: over ? "#B5652F" : "#14403E", transition: "width 0.2s ease" }}
+          style={{ width: `${pct}%`, background: over ? "#B5652F" : barColor, transition: "width 0.2s ease" }}
         />
       </div>
-    </div>
+    </Wrapper>
   );
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  // Deliberately using local date parts, not .toISOString() (which is UTC) —
+  // using UTC here would file anything logged in the first hour or so after
+  // local midnight under the previous day, for anyone not exactly on GMT
+  // (this includes the UK itself during British Summer Time).
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+const MEAL_TYPE_OPTIONS = ["Breakfast", "Lunch", "Dinner", "Snack", "Dessert"];
+
+function nowTimeStr() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function CoachWeekPlanCard({ onViewRecipe }) {
+  const [weekPlan, setWeekPlan] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    const weekStart = mondayOf(new Date());
+    getMyWeekPlan(weekStart)
+      .then((res) => setWeekPlan(res))
+      .catch(() => setWeekPlan(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading || !weekPlan || !weekPlan.plan || Object.keys(weekPlan.plan).length === 0) return null;
+
+  const days = Object.keys(weekPlan.plan).sort();
+
+  return (
+    <div className="pe-card p-4 mb-4">
+      <button className="flex items-center justify-between w-full" onClick={() => setExpanded((v) => !v)}>
+        <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>
+          🗓 Your coach's picks this week
+        </div>
+        <span className="text-xs" style={{ color: "#948A78" }}>{expanded ? "Hide ▲" : "Show ▼"}</span>
+      </button>
+      {expanded && (
+        <div className="pe-fadein mt-3">
+          {weekPlan.coach_note && (
+            <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#F5F4EE", color: "#40473F" }}>
+              {weekPlan.coach_note}
+            </div>
+          )}
+          <div className="space-y-2">
+            {days.map((date) => {
+              const dayPlan = weekPlan.plan[date];
+              const picks = [dayPlan?.lunch, dayPlan?.dinner].filter(Boolean);
+              if (picks.length === 0) return null;
+              return (
+                <div key={date} className="pe-divider pt-2">
+                  <div className="pe-mono text-[11px] mb-1" style={{ color: "#948A78" }}>{date}</div>
+                  {picks.map((p, i) => (
+                    <button
+                      key={i}
+                      className="text-xs font-medium block mb-1"
+                      style={{ color: "#14403E" }}
+                      onClick={() => onViewRecipe(p.section, p.name)}
+                    >
+                      {p.section}: {p.name} →
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function entryMacros(entry) {
@@ -651,6 +1203,7 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
       baseProtein: finalMacros.protein,
       baseCarbs: finalMacros.carbs,
       baseFat: finalMacros.fat,
+      time: nowTimeStr(),
       proteinOverride:
         customizeOpen && customProteinFood && customProteinFood !== pendingItem.proteinFood
           ? { food: customProteinFood, grams: Number(customProteinGrams) }
@@ -732,6 +1285,21 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
               <button className="pe-btn-primary w-6 h-6 rounded-full text-xs font-bold" onClick={() => adjustServings(0.25)}>+</button>
             </div>
           </div>
+
+          {baseMacros && baseMacros.usesFixedProtein && baseMacros.proteinTargetEquivalent && (
+            <div className="rounded-lg p-2.5 mb-3 text-[11px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              This uses a normal serving of {pendingItem.proteinFood.toLowerCase()} ({round(baseMacros.proteinPortion)}g) rather than scaling it
+              to your full protein target (which would need ~{round(baseMacros.proteinTargetEquivalent)}g — unrealistic as a single portion).
+              Consider pairing with an extra protein source to close the gap.
+            </div>
+          )}
+          {baseMacros && baseMacros.usesFixedCarb && baseMacros.carbTargetEquivalent && (
+            <div className="rounded-lg p-2.5 mb-3 text-[11px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              This uses a normal serving of {pendingItem.carbFood.toLowerCase()} ({round(baseMacros.carbPortion)}g) — a deliberately
+              lower-carb ingredient, so it won't cover your full carb target on its own (~{round(baseMacros.carbTargetEquivalent)}g would be
+              needed). Add carbs elsewhere in the day if you need them.
+            </div>
+          )}
 
           {!isFixed && (
             <>
@@ -835,17 +1403,282 @@ function GymScreen({ profile, onAddToTodayLog, onViewRecipe }) {
   );
 }
 
-function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe }) {
+function MyWeekPlanScreen({ profile, myWeekPlans, updateMyWeekPlan, updateCart, onViewRecipe }) {
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [openDay, setOpenDay] = useState(null);
+  const [addStatus, setAddStatus] = useState("");
+
+  const weekStartDate = new Date();
+  weekStartDate.setDate(weekStartDate.getDate() + weekOffset * 7);
+  const weekStart = mondayOf(weekStartDate);
+  const weekDates = weekDatesFrom(weekStart);
+
+  const prevWeekStartDate = new Date();
+  prevWeekStartDate.setDate(prevWeekStartDate.getDate() + (weekOffset - 1) * 7);
+  const prevWeekStart = mondayOf(prevWeekStartDate);
+
+  const plan = myWeekPlans[weekStart]?.plan || {};
+  const targets = computeTargets(profile);
+
+  const setPick = (date, slotKey, section, recipeName) => {
+    const nextPlan = {
+      ...plan,
+      [date]: { ...plan[date], [slotKey]: recipeName ? { name: recipeName, section } : undefined },
+    };
+    updateMyWeekPlan(weekStart, nextPlan);
+  };
+
+  const copyFromPreviousWeek = () => {
+    const prevPlan = myWeekPlans[prevWeekStart]?.plan;
+    if (prevPlan) updateMyWeekPlan(weekStart, prevPlan);
+  };
+
+  const addWeekToOrder = () => {
+    let added = 0;
+    weekDates.forEach((date) => {
+      const dayPlan = plan[date];
+      if (!dayPlan) return;
+      Object.values(dayPlan).forEach((pick) => {
+        if (!pick) return;
+        const sectionData = RECIPE_DATA.sections[pick.section];
+        const item = sectionData?.items.find((i) => i.name === pick.name);
+        if (!item) return;
+        const key = `${pick.section}::${pick.name}`;
+        const isFixed = sectionData.type === "fixed";
+        updateCart(key, pick.section, item, isFixed, 1);
+        added++;
+      });
+    });
+    setAddStatus(added > 0 ? `added` : "empty");
+  };
+
+  const weekLabel = weekOffset === 0 ? "this week" : weekOffset === 1 ? "next week" : `in ${weekOffset} weeks`;
+
+  return (
+    <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
+      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Plan your week</h2>
+      <p className="text-xs mb-4" style={{ color: "#948A78" }}>
+        Set out your meals ahead of time, see what they come to against your targets, then add the whole week
+        to your order in one go and shop accordingly.
+      </p>
+
+      <div className="flex items-center justify-between mb-3">
+        <button
+          className="text-xs font-medium"
+          style={{ color: weekOffset === 0 ? "#B8B2A0" : "#14403E" }}
+          onClick={() => setWeekOffset((w) => Math.max(0, w - 1))}
+          disabled={weekOffset === 0}
+        >
+          ← Prev
+        </button>
+        <span className="text-sm font-semibold" style={{ color: "#14403E" }}>
+          Week of {weekStart} ({weekLabel})
+        </span>
+        <button
+          className="text-xs font-medium"
+          style={{ color: weekOffset >= 4 ? "#B8B2A0" : "#14403E" }}
+          onClick={() => setWeekOffset((w) => Math.min(4, w + 1))}
+          disabled={weekOffset >= 4}
+        >
+          Next →
+        </button>
+      </div>
+
+      <WeekOverviewStrip weekDates={weekDates} plan={plan} targets={targets} />
+
+      <button
+        className="pe-btn-secondary w-full py-2 rounded-full text-xs font-semibold mb-3"
+        onClick={copyFromPreviousWeek}
+        disabled={weekOffset === 0}
+        style={weekOffset === 0 ? { opacity: 0.5 } : {}}
+      >
+        📋 Copy last week's plan as a starting point
+      </button>
+
+      {weekDates.map((date, i) => {
+        const dayMacros = computeDayMacros(plan[date], targets);
+        const isOpen = openDay === date;
+        return (
+          <div key={date} className="pe-card p-3 mb-2">
+            <button className="w-full flex items-center justify-between" onClick={() => setOpenDay(isOpen ? null : date)}>
+              <div className="text-xs font-semibold" style={{ color: "#14403E" }}>
+                {PLAN_DAY_LABELS[i]} <span className="pe-mono" style={{ color: "#948A78" }}>· {date}</span>
+              </div>
+              <span className="text-xs" style={{ color: "#948A78" }}>{isOpen ? "Hide ▲" : "Show ▼"}</span>
+            </button>
+            {!isOpen && dayMacros.calories > 0 && (
+              <div className="pe-mono text-[11px] mt-1" style={{ color: "#948A78" }}>
+                {Math.round(dayMacros.calories)} kcal / {Math.round(targets.calories)}
+              </div>
+            )}
+            {isOpen && (
+              <div className="pe-fadein mt-2">
+                <div className="mb-3">
+                  <DayMacroBars macros={dayMacros} targets={targets} compact />
+                </div>
+                <MealSlotPicker date={date} plan={plan} setPick={setPick} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <button className="pe-btn-primary w-full py-2.5 rounded-full text-sm font-semibold mt-2" onClick={addWeekToOrder}>
+        🧺 Add this week's picks to my order
+      </button>
+      {addStatus === "added" && (
+        <p className="text-xs mt-2 text-center" style={{ color: "#4F6B41" }}>Added to your order — head to Order or Shop to see it.</p>
+      )}
+      {addStatus === "empty" && (
+        <p className="text-xs mt-2 text-center" style={{ color: "#948A78" }}>Nothing picked yet for this week.</p>
+      )}
+    </div>
+  );
+}
+
+// Open Food Facts — free, no API key, no signup, ~3M+ products by barcode.
+// It can return HTTP 200 with status:0 for a barcode it doesn't recognise,
+// so that has to be checked explicitly rather than trusting the HTTP status.
+function extractProductNutrition(p) {
+  const n = p.nutriments || {};
+  const kcal = n["energy-kcal_100g"] ?? (n["energy_100g"] ? n["energy_100g"] / 4.184 : null);
+  if (kcal == null) return null;
+  return {
+    name: p.product_name || p.generic_name || "Unknown product",
+    brand: p.brands || "",
+    kcal: Math.round(kcal),
+    protein: Math.round((n["proteins_100g"] || 0) * 10) / 10,
+    carb: Math.round((n["carbohydrates_100g"] || 0) * 10) / 10,
+    fat: Math.round((n["fat_100g"] || 0) * 10) / 10,
+  };
+}
+
+async function lookupBarcode(barcode) {
+  const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
+  if (!res.ok) throw new Error("Couldn't reach the barcode database — check your connection and try again.");
+  const data = await res.json();
+  if (data.status !== 1 || !data.product) {
+    throw new Error("No product found for that barcode — it may not be in the database yet. You can log it manually instead.");
+  }
+  const product = extractProductNutrition(data.product);
+  if (!product) throw new Error("Found the product, but it has no nutrition data on file — you'll need to log it manually.");
+  return product;
+}
+
+// Open Food Facts also has a genuine free, no-key text-search endpoint,
+// separate from the barcode one — useful specifically for branded/packaged
+// products (a cereal box, a named protein bar) rather than generic whole
+// foods, which the app's own curated list already covers better.
+async function searchPackagedProducts(query) {
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=15`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Couldn't reach the product database — check your connection and try again.");
+  const data = await res.json();
+  const products = (data.products || [])
+    .map(extractProductNutrition)
+    .filter(Boolean)
+    .filter((p) => p.name !== "Unknown product");
+  return products.slice(0, 10);
+}
+
+
+function BarcodeScannerModal({ onScan, onClose }) {
+  const scannerRef = useRef(null);
+  const startedRef = useRef(false);
+  const [error, setError] = useState("");
+  const [found, setFound] = useState(false);
+  const [secondsScanning, setSecondsScanning] = useState(0);
+
+  useEffect(() => {
+    const scanner = new Html5Qrcode("barcode-reader");
+    scannerRef.current = scanner;
+    scanner
+      .start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 260, height: 160 } },
+        (decodedText) => {
+          if (found) return; // ignore any further detections once we've already caught one
+          setFound(true);
+          startedRef.current = false;
+          try { scanner.stop().catch(() => {}); } catch (e) { /* already stopped/never started */ }
+          // Brief, unmissable confirmation before handing off — otherwise the
+          // modal just vanishes instantly and it's genuinely unclear whether
+          // anything happened at all, which is exactly what was being reported.
+          setTimeout(() => onScan(decodedText), 500);
+        },
+        () => {} // fires continuously while no code is found — not a real error, just "still looking"
+      )
+      .then(() => { startedRef.current = true; })
+      .catch(() => setError("Couldn't access the camera — check camera permissions for this site."));
+
+    return () => {
+      if (startedRef.current) {
+        try {
+          scanner.stop().catch(() => {});
+        } catch (e) {
+          // already stopped, or the underlying camera stream is gone — safe to ignore
+        }
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (found || error) return;
+    const timer = setInterval(() => setSecondsScanning((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [found, error]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#0F1210" }}>
+      <div className="flex items-center justify-between p-4">
+        <span className="text-sm font-semibold text-white">Scan a barcode</span>
+        <button className="text-white text-2xl leading-none" onClick={onClose}>×</button>
+      </div>
+      <div className="flex-1 mx-4 rounded-xl overflow-hidden relative" style={{ background: "#000" }}>
+        <div id="barcode-reader" className="w-full h-full" />
+        {found && (
+          <div className="pe-fadein absolute inset-0 flex flex-col items-center justify-center" style={{ background: "rgba(15,18,16,0.9)" }}>
+            <div className="text-4xl mb-2">✅</div>
+            <div className="text-white text-sm font-semibold">Barcode found!</div>
+            <div className="text-white text-xs opacity-70 mt-1">Looking it up…</div>
+          </div>
+        )}
+        {!found && !error && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "rgba(0,0,0,0.55)" }}>
+            <span className="inline-block w-2 h-2 rounded-full pe-pulse" style={{ background: "#6FA968" }} />
+            <span className="text-white text-xs font-medium">Scanning…</span>
+          </div>
+        )}
+      </div>
+      <p className="text-center text-xs text-white opacity-70 p-4">
+        {error ||
+          (secondsScanning > 8
+            ? "Still looking — make sure the barcode is well lit, in focus, and fills the frame. Some barcodes (especially small or curved ones) take a few tries."
+            : "Line up the barcode inside the frame — it'll scan automatically.")}
+      </p>
+    </div>
+  );
+}
+
+function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater, quickAction, onQuickActionHandled }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
+  const [coachFeedback, setCoachFeedback] = useState({});
+  useEffect(() => {
+    getMyFeedback().then(setCoachFeedback).catch(() => {});
+  }, []);
   const [query, setQuery] = useState("");
   const [pendingFood, setPendingFood] = useState(null);
   const [pendingGrams, setPendingGrams] = useState(100);
+  const [pendingTime, setPendingTime] = useState(() => nowTimeStr());
+  const [pendingMealType, setPendingMealType] = useState("Snack");
   const [manualOpen, setManualOpen] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualCal, setManualCal] = useState("");
   const [manualProtein, setManualProtein] = useState("");
   const [manualCarbs, setManualCarbs] = useState("");
   const [manualFat, setManualFat] = useState("");
+  const [manualTime, setManualTime] = useState(() => nowTimeStr());
+  const [manualMealType, setManualMealType] = useState("Snack");
   const targets = useMemo(() => computeTargets(profile), [profile]);
 
   const dayLog = logsByDate[selectedDate] || [];
@@ -871,15 +1704,144 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     );
   }, [dayLog]);
 
-  const addFood = () => {
-    if (!pendingFood || !pendingGrams) return;
+  const [macroView, setMacroView] = useState("today");
+  const [selectedMacro, setSelectedMacro] = useState(null); // "calories" | "protein" | "carbs" | "fat" | null
+
+  const macroBreakdown = useMemo(() => {
+    if (!selectedMacro || macroView !== "today") return [];
+    const rows = dayLog.map((entry) => {
+      const m = entryMacros(entry);
+      const name = entry.type === "food" ? entry.food.name : entry.name;
+      return { id: entry.id, name, mealType: entry.mealType || entry.section, value: m[selectedMacro] };
+    }).filter((r) => r.value > 0);
+    const dayTotal = rows.reduce((sum, r) => sum + r.value, 0);
+    return rows
+      .map((r) => ({ ...r, pct: dayTotal > 0 ? Math.round((r.value / dayTotal) * 100) : 0 }))
+      .sort((a, b) => b.value - a.value);
+  }, [selectedMacro, macroView, dayLog]);
+
+  const weekAvg = useMemo(() => {
+    const sum = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    for (let i = 0; i < 7; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = dateStr(d);
+      (logsByDate[key] || []).forEach((entry) => {
+        const m = entryMacros(entry);
+        sum.calories += m.calories; sum.protein += m.protein; sum.carbs += m.carbs; sum.fat += m.fat;
+      });
+    }
+    return { calories: sum.calories / 7, protein: sum.protein / 7, carbs: sum.carbs / 7, fat: sum.fat / 7 };
+  }, [logsByDate]);
+
+  const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const manualSectionRef = useRef(null);
+
+  useEffect(() => {
+    if (!quickAction) return;
+    if (quickAction === "scan") {
+      setScannerOpen(true);
+    } else if (quickAction === "manual") {
+      setManualOpen(true);
+      // Give the manual section a moment to render/expand before scrolling to it
+      setTimeout(() => manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    }
+    onQuickActionHandled?.();
+  }, [quickAction]);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannedProduct, setScannedProduct] = useState(null);
+  const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
+  const [scanError, setScanError] = useState("");
+  const [scannedGrams, setScannedGrams] = useState(100);
+  const [scannedTime, setScannedTime] = useState(() => nowTimeStr());
+  const [scannedMealType, setScannedMealType] = useState("Snack");
+
+  const [packagedSearchOpen, setPackagedSearchOpen] = useState(false);
+  const [packagedQuery, setPackagedQuery] = useState("");
+  const [packagedResults, setPackagedResults] = useState([]);
+  const [packagedStatus, setPackagedStatus] = useState("");
+  const [packagedError, setPackagedError] = useState("");
+
+  const runPackagedSearch = async () => {
+    if (!packagedQuery.trim()) return;
+    setPackagedStatus("loading");
+    setPackagedError("");
+    setPackagedResults([]);
+    try {
+      const results = await searchPackagedProducts(packagedQuery);
+      if (results.length === 0) setPackagedError("No packaged products matched that search.");
+      setPackagedResults(results);
+      setPackagedStatus("");
+    } catch (e) {
+      setPackagedStatus("error");
+      setPackagedError(e.message);
+    }
+  };
+
+  const handleBarcodeScanned = async (barcode) => {
+    setScannerOpen(false);
+    setScanStatus("loading");
+    setScanError("");
+    try {
+      const product = await lookupBarcode(barcode);
+      setScannedProduct(product);
+      setScannedGrams(100);
+      setScannedTime(nowTimeStr());
+      setScanStatus("");
+    } catch (e) {
+      setScanStatus("error");
+      setScanError(e.message);
+    }
+  };
+
+  const addScannedProduct = () => {
+    if (!scannedProduct) return;
     updateDayLog(selectedDate, [
       ...dayLog,
-      { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams) },
+      {
+        id: Date.now(), type: "food",
+        food: { name: scannedProduct.brand ? `${scannedProduct.name} (${scannedProduct.brand})` : scannedProduct.name,
+                kcal: scannedProduct.kcal, protein: scannedProduct.protein, carb: scannedProduct.carb, fat: scannedProduct.fat },
+        grams: Number(scannedGrams) || 100,
+        time: scannedTime,
+        mealType: scannedMealType,
+      },
     ]);
+    setScannedProduct(null);
+  };
+
+  const addFood = () => {
+    if (!pendingFood || !pendingGrams) return;
+    if (editingFoodEntryId) {
+      updateDayLog(
+        selectedDate,
+        dayLog.map((e) =>
+          e.id === editingFoodEntryId
+            ? { ...e, food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType }
+            : e
+        )
+      );
+      setEditingFoodEntryId(null);
+    } else {
+      updateDayLog(selectedDate, [
+        ...dayLog,
+        { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType },
+      ]);
+    }
     setPendingFood(null);
     setQuery("");
     setPendingGrams(100);
+    setPendingTime(nowTimeStr());
+  };
+
+  const openEditFoodEntry = (entry) => {
+    setPendingFood(entry.food);
+    setQuery(entry.food.name);
+    setPendingGrams(entry.grams);
+    setPendingTime(entry.time || nowTimeStr());
+    setPendingMealType(entry.mealType || "Snack");
+    setEditingFoodEntryId(entry.id);
   };
 
   const addMealEntry = (entry) => updateDayLog(selectedDate, [...dayLog, entry]);
@@ -887,30 +1849,147 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const setEntryServings = (id, servings) =>
     updateDayLog(selectedDate, dayLog.map((e) => (e.id === id ? { ...e, servings: Math.max(0.25, servings) } : e)));
 
+  const [editingEntryId, setEditingEntryId] = useState(null);
+
   const addManualEntry = () => {
-    if (!manualName || !manualCal) return;
-    updateDayLog(selectedDate, [
-      ...dayLog,
-      {
-        id: Date.now(),
-        type: "manual",
-        name: manualName,
-        calories: Number(manualCal) || 0,
-        protein: Number(manualProtein) || 0,
-        carbs: Number(manualCarbs) || 0,
-        fat: Number(manualFat) || 0,
-      },
-    ]);
+    if (!manualName) return;
+    const hasNumbers = manualCal !== "";
+    const newEntry = {
+      id: editingEntryId || Date.now(),
+      type: "manual",
+      name: manualName,
+      calories: Number(manualCal) || 0,
+      protein: Number(manualProtein) || 0,
+      carbs: Number(manualCarbs) || 0,
+      fat: Number(manualFat) || 0,
+      time: manualTime,
+      mealType: manualMealType,
+      quantified: hasNumbers,
+    };
+    if (editingEntryId) {
+      updateDayLog(selectedDate, dayLog.map((e) => (e.id === editingEntryId ? newEntry : e)));
+    } else {
+      updateDayLog(selectedDate, [...dayLog, newEntry]);
+    }
     setManualName(""); setManualCal(""); setManualProtein(""); setManualCarbs(""); setManualFat("");
+    setManualTime(nowTimeStr());
     setManualOpen(false);
+    setEditingEntryId(null);
+  };
+
+  const openEditManualEntry = (entry) => {
+    setManualName(entry.name);
+    setManualCal(entry.calories ? String(entry.calories) : "");
+    setManualProtein(entry.protein ? String(entry.protein) : "");
+    setManualCarbs(entry.carbs ? String(entry.carbs) : "");
+    setManualFat(entry.fat ? String(entry.fat) : "");
+    setManualTime(entry.time || nowTimeStr());
+    setManualMealType(entry.mealType || "Snack");
+    setEditingEntryId(entry.id);
+    setManualOpen(true);
+  };
+
+  const exportLogCSV = () => {
+    const rows = [["Date", "Time", "Meal", "Type", "Item", "Quantity", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Water (glasses)", "Day notes"]];
+    const dates = Object.keys(logsByDate).sort();
+    dates.forEach((date) => {
+      const entries = logsByDate[date] || [];
+      const notes = dayNotes?.[date] || "";
+      const water = waterByDate?.[date];
+      if (entries.length === 0 && !notes && !water) return;
+      if (entries.length === 0) {
+        rows.push([date, "", "", "", "", "", "", "", "", "", water || "", notes]);
+        return;
+      }
+      entries.forEach((entry, i) => {
+        const m = entryMacros(entry);
+        const name = entry.type === "food" ? entry.food.name : entry.name;
+        const qty =
+          entry.type === "food" ? `${entry.grams}g` :
+          entry.type === "manual" ? "manual entry" :
+          `${entry.servings || 1}x serving`;
+        const notYetQuantified = entry.type === "manual" && entry.quantified === false;
+        rows.push([
+          date, entry.time || "", entry.mealType || entry.section || "", entry.type, name, qty,
+          notYetQuantified ? "not yet quantified" : round(m.calories),
+          notYetQuantified ? "" : round(m.protein),
+          notYetQuantified ? "" : round(m.carbs),
+          notYetQuantified ? "" : round(m.fat),
+          i === 0 ? (water || "") : "",
+          i === 0 ? notes : "", // notes only on the first row of that day, to avoid repeating
+        ]);
+      });
+    });
+    const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `polar-endurance-food-log-${todayStr()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
-      <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Daily log</h2>
+      {scannerOpen && (
+        <BarcodeScannerModal onScan={handleBarcodeScanned} onClose={() => setScannerOpen(false)} />
+      )}
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="pe-display text-xl font-semibold" style={{ color: "#14403E" }}>Daily log</h2>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <button
+              className="w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold"
+              style={{ background: "#14403E", color: "#fff" }}
+              onClick={() => setQuickAddOpen((v) => !v)}
+              title="Quick add"
+            >
+              +
+            </button>
+            {quickAddOpen && (
+              <div className="pe-fadein absolute right-0 top-10 z-20 rounded-lg overflow-hidden" style={{ background: "#fff", border: "1px solid #E4E1D6", minWidth: "180px", boxShadow: "0 4px 16px rgba(0,0,0,0.12)" }}>
+                <button
+                  className="w-full text-left px-4 py-3 text-sm font-medium block"
+                  style={{ borderBottom: "1px solid #E4E1D6" }}
+                  onClick={() => { setQuickAddOpen(false); setScannerOpen(true); }}
+                >
+                  📷 Scan a barcode
+                </button>
+                <button
+                  className="w-full text-left px-4 py-3 text-sm font-medium block"
+                  onClick={() => { setQuickAddOpen(false); setManualOpen(true); manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                >
+                  ✏️ Manual entry
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+            onClick={exportLogCSV}
+            title="Download your entire food log history as a spreadsheet (opens in Excel)"
+          >
+            ⬇ Export
+          </button>
+        </div>
+      </div>
       <p className="text-xs mb-4" style={{ color: "#948A78" }}>
         Log meals or individual foods and see them stack up against your daily target. Each day is saved separately.
       </p>
+
+      <CoachWeekPlanCard onViewRecipe={onViewRecipe} />
+
+      {coachFeedback[selectedDate] && (
+        <div className="pe-card p-4 mb-4" style={{ background: "#EEF3EC" }}>
+          <div className="pe-display text-sm font-semibold mb-1.5" style={{ color: "#4F6B41" }}>
+            💬 Feedback from your coach
+          </div>
+          <p className="text-sm" style={{ color: "#40473F" }}>{coachFeedback[selectedDate]}</p>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 mb-4">
         <input
@@ -943,16 +2022,234 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       <TrendsChart logsByDate={logsByDate} targets={targets} />
 
       <div className="pe-card p-4 mb-4">
-        <ProgressBar label="Calories" consumed={totals.calories} target={targets.calories} unit="" />
-        <ProgressBar label="Protein" consumed={totals.protein} target={targets.protein} unit="g" />
-        <ProgressBar label="Carbs" consumed={totals.carbs} target={targets.carbs} unit="g" />
-        <ProgressBar label="Fat" consumed={totals.fat} target={targets.fat} unit="g" />
+        <div className="flex gap-2 mb-3">
+          <button
+            className="text-xs font-semibold px-3 py-1 rounded-full"
+            style={macroView === "today" ? { background: "#14403E", color: "#fff" } : { background: "#EDE9DD", color: "#14403E" }}
+            onClick={() => setMacroView("today")}
+          >
+            Today
+          </button>
+          <button
+            className="text-xs font-semibold px-3 py-1 rounded-full"
+            style={macroView === "week" ? { background: "#14403E", color: "#fff" } : { background: "#EDE9DD", color: "#14403E" }}
+            onClick={() => setMacroView("week")}
+          >
+            This week (daily average)
+          </button>
+        </div>
+        <ProgressBar
+          label="Energy" consumed={macroView === "today" ? totals.calories : weekAvg.calories} target={targets.calories} unit=" kcal" color="#E08D52"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "calories" ? null : "calories") : undefined}
+          active={selectedMacro === "calories"}
+        />
+        <ProgressBar
+          label="Protein" consumed={macroView === "today" ? totals.protein : weekAvg.protein} target={targets.protein} unit="g" color="#6FA968"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "protein" ? null : "protein") : undefined}
+          active={selectedMacro === "protein"}
+        />
+        <ProgressBar
+          label="Net Carbs" consumed={macroView === "today" ? totals.carbs : weekAvg.carbs} target={targets.carbs} unit="g" color="#4FA3AC"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "carbs" ? null : "carbs") : undefined}
+          active={selectedMacro === "carbs"}
+        />
+        <ProgressBar
+          label="Fat" consumed={macroView === "today" ? totals.fat : weekAvg.fat} target={targets.fat} unit="g" color="#A67FC0"
+          onClick={macroView === "today" ? () => setSelectedMacro(selectedMacro === "fat" ? null : "fat") : undefined}
+          active={selectedMacro === "fat"}
+        />
+        {macroView === "week" && (
+          <p className="text-[11px] mt-1" style={{ color: "#948A78" }}>
+            Averaged across the last 7 days (days with nothing logged count as zero).
+          </p>
+        )}
+        {macroView === "today" && !selectedMacro && (
+          <p className="text-[11px] mt-1" style={{ color: "#948A78" }}>
+            Tap any bar above to see which meals or items it's coming from.
+          </p>
+        )}
+        {selectedMacro && macroBreakdown.length > 0 && (
+          <div className="pe-fadein mt-3 pt-3" style={{ borderTop: "1px solid #E4E1D6" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "#14403E" }}>
+              Where today's {selectedMacro === "calories" ? "energy" : selectedMacro === "carbs" ? "carbs" : selectedMacro} is coming from
+            </div>
+            {macroBreakdown.map((row) => (
+              <div key={row.id} className="mb-1.5">
+                <div className="flex justify-between text-xs mb-0.5">
+                  <span style={{ color: "#40473F" }}>
+                    {row.name}{row.mealType ? <span style={{ color: "#948A78" }}> · {row.mealType}</span> : null}
+                  </span>
+                  <span className="pe-mono" style={{ color: "#948A78" }}>
+                    {round(row.value)}{selectedMacro === "calories" ? " kcal" : "g"} · {row.pct}%
+                  </span>
+                </div>
+                <div className="w-full rounded-full" style={{ background: "#E9E5D8", height: "4px" }}>
+                  <div className="rounded-full" style={{ width: `${row.pct}%`, background: "#B8B2A0", height: "4px" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="pe-card p-4 mb-4">
+        <div className="pe-display text-sm font-semibold mb-2" style={{ color: "#14403E" }}>💧 Water</div>
+        <ProgressBar label="Glasses" consumed={waterByDate?.[selectedDate] || 0} target={8} unit="" color="#5B9BD5" />
+        <div className="flex items-center gap-3 mt-2">
+          <button
+            className="pe-btn-secondary w-9 h-9 rounded-full text-lg font-bold flex items-center justify-center"
+            onClick={() => updateWater(selectedDate, (waterByDate?.[selectedDate] || 0) - 1)}
+          >
+            −
+          </button>
+          <span className="text-xs flex-1 text-center" style={{ color: "#948A78" }}>
+            Tap to log a glass as you drink it — roughly 8 x 250ml is a common everyday guideline, not a strict target.
+          </span>
+          <button
+            className="pe-btn-primary w-9 h-9 rounded-full text-lg font-bold flex items-center justify-center"
+            onClick={() => updateWater(selectedDate, (waterByDate?.[selectedDate] || 0) + 1)}
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="pe-card p-4 mb-4">
+        <div className="pe-display text-sm font-semibold mb-1.5" style={{ color: "#14403E" }}>
+          How are you feeling today?
+        </div>
+        <p className="text-xs mb-2" style={{ color: "#948A78" }}>
+          Bloating, energy, digestion, mood — anything worth tracking alongside what you ate. Useful for spotting
+          patterns over time, including with a coach or GP.
+        </p>
+        <textarea
+          className="pe-input w-full px-3 py-2 text-sm"
+          rows={3}
+          placeholder="e.g. Felt bloated after lunch, low energy this afternoon..."
+          value={dayNotes?.[selectedDate] || ""}
+          onChange={(e) => updateDayNotes(selectedDate, e.target.value)}
+        />
       </div>
 
       <AddMealLog profile={profile} onAdd={addMealEntry} onViewRecipe={onViewRecipe} />
 
       <div className="pe-card p-4 mb-4">
-        <div className="pe-display text-sm font-semibold mb-3" style={{ color: "#14403E" }}>Add a food</div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Add a food</div>
+          <div className="flex gap-2">
+            <button
+              className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+              onClick={() => { setPackagedSearchOpen((v) => !v); setScannedProduct(null); }}
+            >
+              🔍 Packaged product
+            </button>
+            <button
+              className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
+              onClick={() => setScannerOpen(true)}
+            >
+              📷 Scan barcode
+            </button>
+          </div>
+        </div>
+        {packagedSearchOpen && (
+          <div className="pe-fadein mb-3">
+            <p className="text-[11px] mb-2" style={{ color: "#948A78" }}>
+              Searches branded/packaged products only (cereals, bars, ready meals) — for a generic ingredient
+              like "chicken breast" or "banana", use the search box below instead.
+            </p>
+            <input
+              className="pe-input w-full px-3 py-2.5 text-sm mb-2"
+              placeholder="e.g. Special K, Quest bar, Innocent smoothie..."
+              value={packagedQuery}
+              onChange={(e) => setPackagedQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runPackagedSearch(); }}
+            />
+            <button className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold" onClick={runPackagedSearch} disabled={packagedStatus === "loading"}>
+              {packagedStatus === "loading" ? "Searching…" : "Search"}
+            </button>
+            {packagedStatus === "error" && (
+              <p className="text-xs mt-2" style={{ color: "#B5652F" }}>{packagedError}</p>
+            )}
+            {packagedResults.length > 0 && (
+              <div className="mt-2 rounded-lg overflow-hidden" style={{ border: "1px solid #E4E1D6" }}>
+                {packagedResults.map((p, i) => (
+                  <button
+                    key={i}
+                    className="w-full text-left px-3 py-2 text-xs block"
+                    style={{ borderBottom: i < packagedResults.length - 1 ? "1px solid #E4E1D6" : "none" }}
+                    onClick={() => { setScannedProduct(p); setScannedGrams(100); setPackagedResults([]); setPackagedSearchOpen(false); }}
+                  >
+                    <div className="font-medium">{p.name}{p.brand ? ` (${p.brand})` : ""}</div>
+                    <div style={{ color: "#948A78" }}>{p.kcal} kcal · P{p.protein} C{p.carb} F{p.fat} per 100g</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {scanStatus === "loading" && (
+          <p className="text-xs mb-2" style={{ color: "#948A78" }}>Looking that up…</p>
+        )}
+        {scanStatus === "error" && (
+          <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+            <p className="mb-2">{scanError}</p>
+            <div className="flex gap-2">
+              <button
+                className="text-xs font-semibold underline"
+                onClick={() => { setScanStatus(""); setScannerOpen(true); }}
+              >
+                Try scanning again
+              </button>
+              <button
+                className="text-xs font-semibold underline"
+                onClick={() => { setScanStatus(""); setManualOpen(true); }}
+              >
+                Log manually instead
+              </button>
+            </div>
+          </div>
+        )}
+        {scannedProduct && (
+          <div className="pe-fadein rounded-lg p-3 mb-3" style={{ background: "#F5F4EE", border: "1px solid #E4E1D6" }}>
+            <div className="text-sm font-semibold mb-1" style={{ color: "#14403E" }}>{scannedProduct.name}</div>
+            <div className="text-xs mb-2" style={{ color: "#948A78" }}>
+              Per 100g: {scannedProduct.kcal} kcal · P{scannedProduct.protein} C{scannedProduct.carb} F{scannedProduct.fat}
+            </div>
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="number"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                value={scannedGrams}
+                onChange={(e) => setScannedGrams(e.target.value)}
+              />
+              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+              <input
+                type="time"
+                className="pe-input px-2 py-2 text-sm"
+                value={scannedTime}
+                onChange={(e) => setScannedTime(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                className="pe-input flex-1 px-2 py-2 text-sm"
+                value={scannedMealType}
+                onChange={(e) => setScannedMealType(e.target.value)}
+              >
+                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
+                Add
+              </button>
+              <button className="text-xs font-medium" style={{ color: "#948A78" }} onClick={() => setScannedProduct(null)}>
+                Cancel
+              </button>
+            </div>
+            <p className="text-[10px] mt-2" style={{ color: "#948A78" }}>
+              From Open Food Facts, a free community-maintained database — figures can occasionally be off or missing for less common products.
+            </p>
+          </div>
+        )}
         <input
           className="pe-input w-full px-3 py-2.5 mb-2 text-sm"
           placeholder="Search foods (e.g. chicken breast, oats...)"
@@ -981,23 +2278,49 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         )}
 
         {pendingFood && (
-          <div className="pe-fadein flex items-center gap-2 mb-2">
-            <input
-              type="number"
-              className="pe-input flex-1 px-3 py-2 text-sm"
-              value={pendingGrams}
-              onChange={(e) => setPendingGrams(e.target.value)}
-              placeholder="grams"
-            />
-            <span className="text-xs" style={{ color: "#948A78" }}>g</span>
-            <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
-              Add
-            </button>
+          <div className="pe-fadein mb-2">
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="number"
+                className="pe-input flex-1 px-3 py-2 text-sm"
+                value={pendingGrams}
+                onChange={(e) => setPendingGrams(e.target.value)}
+                placeholder="grams"
+              />
+              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
+              <input
+                type="time"
+                className="pe-input px-2 py-2 text-sm"
+                value={pendingTime}
+                onChange={(e) => setPendingTime(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                className="pe-input flex-1 px-2 py-2 text-sm"
+                value={pendingMealType}
+                onChange={(e) => setPendingMealType(e.target.value)}
+              >
+                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
+                {editingFoodEntryId ? "Save" : "Add"}
+              </button>
+              {editingFoodEntryId && (
+                <button
+                  className="text-xs font-medium"
+                  style={{ color: "#948A78" }}
+                  onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams(100); setEditingFoodEntryId(null); }}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      <div className="pe-card p-4 mb-4">
+      <div className="pe-card p-4 mb-4" ref={manualSectionRef}>
         <button
           className="flex items-center justify-between w-full"
           onClick={() => setManualOpen((o) => !o)}
@@ -1037,14 +2360,54 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 <input type="number" className="pe-input w-full px-2 py-2 text-sm" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
               </div>
             </div>
+            <div className="mb-3 flex gap-2">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
+                <input
+                  type="time"
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={manualTime}
+                  onChange={(e) => setManualTime(e.target.value)}
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
+                <select
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={manualMealType}
+                  onChange={(e) => setManualMealType(e.target.value)}
+                >
+                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+            </div>
+            <p className="text-[11px] mb-3" style={{ color: "#948A78" }}>
+              Just tracking what you ate for now? Leave the numbers blank and add them later — useful if you're
+              trying to spot which foods trigger something and don't want the calorie lookup to slow you down in
+              the moment.
+            </p>
             <button
               className="pe-btn-primary w-full py-2.5 rounded-full text-xs font-semibold"
               onClick={addManualEntry}
-              disabled={!manualName || !manualCal}
-              style={!manualName || !manualCal ? { opacity: 0.5 } : {}}
+              disabled={!manualName}
+              style={!manualName ? { opacity: 0.5 } : {}}
             >
-              Add to log
+              {editingEntryId ? "Save changes" : "Add to log"}
             </button>
+            {editingEntryId && (
+              <button
+                className="w-full text-xs font-medium text-center mt-2"
+                style={{ color: "#948A78" }}
+                onClick={() => {
+                  setManualName(""); setManualCal(""); setManualProtein(""); setManualCarbs(""); setManualFat("");
+                  setManualTime(nowTimeStr());
+                  setEditingEntryId(null);
+                  setManualOpen(false);
+                }}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1084,11 +2447,45 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                         <div className="text-sm font-medium truncate">{entry.food.name}</div>
                       )}
                     </div>
-                    <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
-                      {entry.type === "food" && `${entry.grams}g · `}
-                      {entry.type === "manual" && "manual entry · "}
-                      {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
-                    </div>
+                    {entry.type === "manual" && entry.quantified === false ? (
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                          {entry.mealType && `${entry.mealType} · `}
+                          {entry.time && `${entry.time} · `}not yet quantified
+                        </span>
+                        <button
+                          className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+                          style={{ background: "#F5DCC9", color: "#9C5527" }}
+                          onClick={() => openEditManualEntry(entry)}
+                        >
+                          Add nutrition info
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
+                        {entry.mealType && `${entry.mealType} · `}
+                        {entry.time && `${entry.time} · `}
+                        {entry.type === "food" && `${entry.grams}g · `}
+                        {entry.type === "manual" && "manual entry · "}
+                        {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
+                        {entry.type === "manual" && (
+                          <button
+                            className="ml-2 underline decoration-dotted"
+                            onClick={() => openEditManualEntry(entry)}
+                          >
+                            edit
+                          </button>
+                        )}
+                        {entry.type === "food" && (
+                          <button
+                            className="ml-2 underline decoration-dotted"
+                            onClick={() => openEditFoodEntry(entry)}
+                          >
+                            edit
+                          </button>
+                        )}
+                      </div>
+                    )}
                     {entry.proteinOverride && (
                       <div className="text-[11px] italic mt-0.5" style={{ color: "#B5652F" }}>
                         Swapped: {entry.proteinOverride.grams}g {entry.proteinOverride.food}
@@ -1137,6 +2534,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
 
 function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, onBulkAdd, expanded, onToggleExpand, sectionBadge }) {
+  const [showCupboard, setShowCupboard] = useState(false);
   return (
     <div className="pe-card p-4 mb-3">
       <div className="flex items-start justify-between gap-3">
@@ -1151,6 +2549,11 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
               {item.name}
             </span>
             {veggie && <span className="pe-badge-veggie text-[10px] font-semibold px-2 py-0.5 rounded-full">VEGGIE</span>}
+            {item.recoveryDay && (
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "#F5DCC9", color: "#9C5527" }}>
+                🔥 RECOVERY DAY
+              </span>
+            )}
           </div>
           {item.time && <span className="pe-badge-time text-[11px] px-2 py-0.5 rounded-full">{item.time}</span>}
         </div>
@@ -1181,11 +2584,45 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
               <>
                 <li>{item.proteinFood} — {round(macros.proteinPortion)}g</li>
                 <li>{item.carbFood} — {round(macros.carbPortion)}g</li>
-                {item.vegFood && <li>{item.vegText}</li>}
+                {(item.extras || []).map((e, i) => (
+                  <li key={i}>{e.food} — {round(e.grams)}g</li>
+                ))}
+                {filterRedundantVegText(item.vegText, item.extras) && (
+                  <li className="text-[12px]" style={{ color: "#948A78" }}>Also: {filterRedundantVegText(item.vegText, item.extras)}</li>
+                )}
               </>
             )}
-            <li className="text-[12px]" style={{ color: "#948A78" }}>Plus: oil, salt, spices (see Store Cupboard)</li>
+            <li className="text-[12px]" style={{ color: "#948A78" }}>
+              Plus: oil, salt, spices —{" "}
+              <button
+                className="underline decoration-dotted"
+                onClick={(e) => { e.stopPropagation(); setShowCupboard((v) => !v); }}
+              >
+                see Store Cupboard
+              </button>
+            </li>
           </ul>
+          {showCupboard && (
+            <div className="rounded-lg p-3 mb-3" style={{ background: "#F5F4EE", border: "1px solid #E4E1D6" }}>
+              <StoreCupboardList compact />
+            </div>
+          )}
+          {macros.usesFixedProtein && macros.proteinTargetEquivalent && (
+            <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              <strong>Protein note:</strong> this recipe uses a normal serving of {item.proteinFood.toLowerCase()} ({round(macros.proteinPortion)}g),
+              giving {round(macros.proteinG)}g protein. To get your full protein target for this meal from {item.proteinFood.toLowerCase()} alone,
+              you'd need roughly {round(macros.proteinTargetEquivalent)}g — a genuinely unrealistic single portion. Pair this with an extra
+              protein source (a shake, some Greek yoghurt, a couple of eggs) to close the gap, or treat this as a lighter meal within your day's total.
+            </div>
+          )}
+          {macros.usesFixedCarb && macros.carbTargetEquivalent && (
+            <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
+              <strong>Carb note:</strong> this recipe uses a normal serving of {item.carbFood.toLowerCase()} ({round(macros.carbPortion)}g),
+              giving {round(macros.carbG)}g carbs. {item.carbFood} is deliberately low in carbs, so hitting your full carb target from it
+              alone would need roughly {round(macros.carbTargetEquivalent)}g — an unrealistic single portion, and it would also defeat the
+              point of a lower-carb dish. If you need the rest of your carbs today, add them elsewhere in the day rather than to this meal.
+            </div>
+          )}
           {dietarySwaps(item, isFixed).length > 0 && (
             <>
               <div className="font-semibold text-xs uppercase tracking-wide mb-1.5" style={{ color: "#14403E" }}>Dietary swaps</div>
@@ -1251,9 +2688,11 @@ const BROWSE_TABS = [...SECTION_ORDER, ALL_KEY];
 function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) {
   const [section, setSection] = useState(jumpTarget ? jumpTarget.section : "Breakfast");
   const [search, setSearch] = useState(jumpTarget ? jumpTarget.name : "");
+  const [ingredientTypeahead, setIngredientTypeahead] = useState("");
   const [veggieOnly, setVeggieOnly] = useState(false);
   const [glutenFreeOnly, setGlutenFreeOnly] = useState(false);
   const [dairyFreeOnly, setDairyFreeOnly] = useState(false);
+  const [recoveryDayOnly, setRecoveryDayOnly] = useState(false);
   const [timeFilter, setTimeFilter] = useState("any"); // any | quick | standard | batch
   const [expandedKey, setExpandedKey] = useState(jumpTarget ? `${jumpTarget.section}::${jumpTarget.name}` : null);
   const targets = useMemo(() => computeTargets(profile), [profile]);
@@ -1283,7 +2722,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
     } else {
       if (x.item.proteinFood && x.item.proteinFood.toLowerCase().includes(q)) return true;
       if (x.item.carbFood && x.item.carbFood.toLowerCase().includes(q)) return true;
-      if (x.item.vegFood && x.item.vegFood.toLowerCase().includes(q)) return true;
+      if ((x.item.extras || []).some((e) => e.food.toLowerCase().includes(q))) return true;
       if (x.item.vegText && x.item.vegText.toLowerCase().includes(q)) return true;
     }
     return false;
@@ -1325,9 +2764,10 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
       .filter((x) => !veggieOnly || x.veggie)
       .filter((x) => !glutenFreeOnly || isGlutenFree(x.item, x.isFixed))
       .filter((x) => !dairyFreeOnly || isDairyFree(x.item, x.isFixed))
+      .filter((x) => (recoveryDayOnly ? x.item.recoveryDay : !x.item.recoveryDay))
       .filter((x) => matchesTimeFilter(x.item, x.isFixed))
       .filter((x) => itemMatchesSearch(x, search));
-  }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, search, timeFilter]);
+  }, [isAll, section, targets, veggieOnly, glutenFreeOnly, dairyFreeOnly, recoveryDayOnly, search, timeFilter]);
 
   return (
     <div className="pe-fadein">
@@ -1369,6 +2809,29 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
           >
             Dairy-free
           </button>
+          <button
+            className={`pe-chip px-3 py-2 text-xs font-semibold ${recoveryDayOnly ? "active" : ""}`}
+            onClick={() => setRecoveryDayOnly((v) => !v)}
+            title="Big, tasty, carb-and-protein-forward meals for after a hard session — calories aren't the focus here"
+          >
+            🔥 Recovery day
+          </button>
+          {(veggieOnly || glutenFreeOnly || dairyFreeOnly || recoveryDayOnly || timeFilter !== "any" || search) && (
+            <button
+              className="pe-chip px-3 py-2 text-xs font-semibold"
+              style={{ background: "#F5DCC9", color: "#9C5527" }}
+              onClick={() => {
+                setVeggieOnly(false);
+                setGlutenFreeOnly(false);
+                setDairyFreeOnly(false);
+                setRecoveryDayOnly(false);
+                setTimeFilter("any");
+                setSearch("");
+              }}
+            >
+              ✕ Reset all
+            </button>
+          )}
         </div>
         <div className="flex gap-2 px-4 pb-3 overflow-x-auto pe-scroll">
           {[
@@ -1387,6 +2850,33 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
           ))}
         </div>
         <div className="px-4 pb-3">
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              className="pe-input flex-1 px-3 py-2 text-sm"
+              placeholder="...or type your own ingredient (e.g. strawberry)"
+              value={ingredientTypeahead}
+              onChange={(e) => setIngredientTypeahead(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && ingredientTypeahead.trim()) {
+                  setSearch(ingredientTypeahead.trim());
+                  setSection(ALL_KEY);
+                  setExpandedKey(null);
+                }
+              }}
+            />
+            <button
+              className="pe-btn-secondary px-4 py-2 rounded-full text-xs font-semibold"
+              onClick={() => {
+                if (!ingredientTypeahead.trim()) return;
+                setSearch(ingredientTypeahead.trim());
+                setSection(ALL_KEY);
+                setExpandedKey(null);
+              }}
+            >
+              Search
+            </button>
+          </div>
           <select
             className="pe-input w-full px-3 py-2 text-sm"
             value=""
@@ -1397,7 +2887,7 @@ function BrowseScreen({ profile, cart, updateCart, jumpTarget, onJumpHandled }) 
               setExpandedKey(null);
             }}
           >
-            <option value="">Tired and don't know what to cook? Pick an ingredient…</option>
+            <option value="">...or pick from a common ingredient list</option>
             {Object.entries(INGREDIENT_GROUPS).map(([groupLabel, names]) => (
               <optgroup key={groupLabel} label={groupLabel}>
                 {names.map((n) => (
@@ -1600,7 +3090,7 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
         const m = scaledMacros(v.item, target);
         addQty(v.item.proteinFood, v.item.proteinCategory, m.proteinPortion * v.qty);
         addQty(v.item.carbFood, v.item.carbCategory, m.carbPortion * v.qty);
-        if (v.item.vegFood) addQty(v.item.vegFood, v.item.vegCategory, v.item.vegGrams * v.qty);
+        (v.item.extras || []).forEach((e) => addQty(e.food, e.category, e.grams * v.qty));
       }
     });
 
@@ -1618,12 +3108,26 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
   const allNames = Object.values(grouped).flat().map((i) => i.name);
   const checkedCount = allNames.filter((n) => checkedItems[n]).length;
 
+  const [showCupboard, setShowCupboard] = useState(false);
+
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
       <h2 className="pe-display text-xl font-semibold mb-1" style={{ color: "#14403E" }}>Shopping list</h2>
       <p className="text-xs mb-4" style={{ color: "#948A78" }}>
         Totals from everything in your order. Pantry basics (oil, salt, spices, sauces) aren't included — stock those separately.
       </p>
+
+      <div className="pe-card p-4 mb-4">
+        <button className="flex items-center justify-between w-full" onClick={() => setShowCupboard((v) => !v)}>
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Store Cupboard Essentials</div>
+          <span className="text-xs" style={{ color: "#948A78" }}>{showCupboard ? "Hide ▲" : "Show ▼"}</span>
+        </button>
+        {showCupboard && (
+          <div className="pe-fadein mt-3">
+            <StoreCupboardList />
+          </div>
+        )}
+      </div>
 
       {!hasAny && (
         <p className="text-sm text-center py-10" style={{ color: "#948A78" }}>Add some meals to your order first.</p>
@@ -1764,26 +3268,48 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
   );
 }
 
-const TABS = [
+const PRIMARY_TABS = [
   { key: "log", label: "Daily Log", icon: "📊" },
   { key: "browse", label: "Recipes", icon: "🍴" },
+  { key: "plan", label: "Plan", icon: "🗓" },
   { key: "gym", label: "Gym", icon: "🏋" },
+];
+const MORE_TABS = [
   { key: "order", label: "Order", icon: "🧺" },
   { key: "shopping", label: "Shop", icon: "🛒" },
   { key: "setup", label: "Setup", icon: "⚙" },
 ];
+const TABS = [...PRIMARY_TABS, ...MORE_TABS];
 
-function AthleteApp({ currentUserId, userEmail, onSignOut }) {
+function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRefresh }) {
   const [ready, setReady] = useState(false);
+  const [hasOnboarded, setHasOnboarded] = useState(true); // default true so returning users never briefly see the first-run framing
   const [tab, setTab] = useState("setup");
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [logQuickAction, setLogQuickAction] = useState(null);
   const [profile, setProfileState] = useState(DEFAULT_PROFILE);
   const [cart, setCartState] = useState({});
   const [logsByDate, setLogsByDate] = useState({});
+  const [dayNotes, setDayNotes] = useState({});
+  const [waterByDate, setWaterByDate] = useState({});
+  const [myWeekPlans, setMyWeekPlans] = useState({}); // { weekStart: { plan: {...} } }
   const [checkedItems, setCheckedItemsState] = useState({});
   const [jumpTarget, setJumpTarget] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
   const [hiddenItems, setHiddenItemsState] = useState({});
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | error
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   const viewRecipe = useCallback((section, name) => {
     setJumpTarget({ section, name });
@@ -1794,9 +3320,19 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
     (async () => {
       setSyncUserId(currentUserId);
       if (currentUserId) {
+        // If this device already has local data (has been used before), it may
+        // hold changes made while offline that were never successfully pushed —
+        // pulling first would silently overwrite and lose them. Push first to
+        // make sure anything local is safely persisted, then only pull if this
+        // is a genuinely fresh device with nothing local to protect yet.
+        const hasLocalData = await loadStored("pe_onboarded", false);
         setSyncStatus("syncing");
         try {
-          await pullUserData(currentUserId);
+          if (hasLocalData) {
+            await pushUserData(currentUserId);
+          } else {
+            await pullUserData(currentUserId);
+          }
           setSyncStatus("synced");
         } catch {
           setSyncStatus("error");
@@ -1806,16 +3342,23 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
       const p = await loadStored("pe_profile", DEFAULT_PROFILE);
       const c = await loadStored("pe_cart", {});
       const l = await loadStored("pe_logs_by_date", {});
+      const dn = await loadStored("pe_day_notes", {});
+      const wt = await loadStored("pe_water_by_date", {});
+      const mwp = await loadStored("pe_my_week_plans", {});
       const ch = await loadStored("pe_checked_items", {});
       const oh = await loadStored("pe_order_history", []);
       const hi = await loadStored("pe_hidden_items", {});
       setProfileState(p);
       setCartState(c);
       setLogsByDate(l);
+      setDayNotes(dn);
+      setWaterByDate(wt);
+      setMyWeekPlans(mwp);
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
-      setTab(onboarded ? "log" : "setup");
+      setTab(onboarded ? "log" : "guide");
+      setHasOnboarded(onboarded);
       setReady(true);
     })();
   }, [currentUserId]);
@@ -1847,6 +3390,30 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
     setLogsByDate((prev) => {
       const next = { ...prev, [date]: entries };
       saveStored("pe_logs_by_date", next);
+      return next;
+    });
+  }, []);
+
+  const updateDayNotes = useCallback((date, text) => {
+    setDayNotes((prev) => {
+      const next = { ...prev, [date]: text };
+      saveStored("pe_day_notes", next);
+      return next;
+    });
+  }, []);
+
+  const updateWater = useCallback((date, glasses) => {
+    setWaterByDate((prev) => {
+      const next = { ...prev, [date]: Math.max(0, glasses) };
+      saveStored("pe_water_by_date", next);
+      return next;
+    });
+  }, []);
+
+  const updateMyWeekPlan = useCallback((weekStart, plan) => {
+    setMyWeekPlans((prev) => {
+      const next = { ...prev, [weekStart]: { plan } };
+      saveStored("pe_my_week_plans", next);
       return next;
     });
   }, []);
@@ -1959,44 +3526,129 @@ function AthleteApp({ currentUserId, userEmail, onSignOut }) {
       </div>
 
       <div style={{ paddingBottom: "76px" }}>
+        {!isOnline && (
+          <div className="px-5 py-2 text-xs font-medium text-center" style={{ background: "#FFF7ED", color: "#9C5527", borderBottom: "1px solid #F5DCC9" }}>
+            You're offline — everything you log is saved on this device and will sync automatically once you're back online.
+          </div>
+        )}
+        {tab === "guide" && (
+          <HelpGuideScreen
+            isFirstRun={!hasOnboarded}
+            onGetStarted={() => setTab("setup")}
+          />
+        )}
+        {tab === "cooking" && <CookingGuideScreen />}
         {tab === "setup" && (
           <SetupScreen
             profile={profile}
             setProfile={setProfile}
             userEmail={userEmail}
             onSignOut={onSignOut}
+            syncStatus={syncStatus}
+            isOnline={isOnline}
+            onOpenGuide={() => setTab("guide")}
+            onOpenCookingGuide={() => setTab("cooking")}
+            currentUserId={currentUserId}
+            coachId={coachId}
+            onProfileRefresh={onProfileRefresh}
           />
         )}
-        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} />}
+        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} quickAction={logQuickAction} onQuickActionHandled={() => setLogQuickAction(null)} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
+        {tab === "plan" && <MyWeekPlanScreen profile={profile} myWeekPlans={myWeekPlans} updateMyWeekPlan={updateMyWeekPlan} updateCart={updateCart} onViewRecipe={viewRecipe} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
         {tab === "shopping" && <ShoppingListScreen cart={cart} profile={profile} checkedItems={checkedItems} toggleChecked={toggleChecked} clearChecks={clearChecks} onArchive={archiveOrder} hiddenItems={hiddenItems} onClearTicked={clearTicked} />}
       </div>
 
+      {moreMenuOpen && (
+        <div
+          className="fixed inset-0 z-30"
+          style={{ background: "rgba(20,64,62,0.15)" }}
+          onClick={() => setMoreMenuOpen(false)}
+        />
+      )}
+
       <div
-        className="fixed bottom-0 left-0 right-0 flex justify-around items-center py-2 px-2"
+        className="fixed left-0 right-0 z-40 pe-fadein"
+        style={{
+          bottom: moreMenuOpen ? "68px" : "-420px",
+          maxWidth: "480px", margin: "0 auto", padding: "0 12px",
+          transition: "bottom 0.2s ease",
+        }}
+      >
+        <div className="rounded-2xl overflow-hidden mb-2" style={{ background: "#fff", border: "1px solid #E4E1D6", boxShadow: "0 -4px 20px rgba(0,0,0,0.1)" }}>
+          <button
+            className="w-full flex items-center gap-3 px-4 py-3 text-left"
+            style={{ borderBottom: "1px solid #E4E1D6", color: "#40473F" }}
+            onClick={() => { setTab("log"); setLogQuickAction("scan"); setMoreMenuOpen(false); }}
+          >
+            <span className="text-lg">📷</span>
+            <span className="text-sm font-semibold flex-1">Scan a barcode</span>
+          </button>
+          <button
+            className="w-full flex items-center gap-3 px-4 py-3 text-left"
+            style={{ color: "#40473F" }}
+            onClick={() => { setTab("log"); setLogQuickAction("manual"); setMoreMenuOpen(false); }}
+          >
+            <span className="text-lg">✏️</span>
+            <span className="text-sm font-semibold flex-1">Manual food entry</span>
+          </button>
+        </div>
+        <div className="rounded-2xl overflow-hidden" style={{ background: "#fff", border: "1px solid #E4E1D6", boxShadow: "0 -4px 20px rgba(0,0,0,0.1)" }}>
+          {MORE_TABS.map((t, i) => (
+            <button
+              key={t.key}
+              className="w-full flex items-center gap-3 px-4 py-3 text-left"
+              style={{ borderBottom: i < MORE_TABS.length - 1 ? "1px solid #E4E1D6" : "none", color: tab === t.key ? "#14403E" : "#40473F" }}
+              onClick={() => { setTab(t.key); setMoreMenuOpen(false); }}
+            >
+              <span className="text-lg">{t.icon}</span>
+              <span className="text-sm font-semibold flex-1">{t.label}</span>
+              {t.key === "order" && cartCount > 0 && (
+                <span
+                  className="pe-mono text-[11px] font-bold text-white rounded-full flex items-center justify-center"
+                  style={{ background: "#B5652F", minWidth: 18, height: 18, padding: "0 4px" }}
+                >
+                  {cartCount}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        className="fixed bottom-0 left-0 right-0 flex justify-around items-center py-2 px-2 z-40"
         style={{ background: "#FFFFFF", borderTop: "1px solid #E4E1D6", maxWidth: "100vw" }}
       >
-        {TABS.map((t) => (
+        {PRIMARY_TABS.map((t) => (
           <button
             key={t.key}
             className="flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl relative"
             style={{ color: tab === t.key ? "#14403E" : "#948A78" }}
-            onClick={() => setTab(t.key)}
+            onClick={() => { setTab(t.key); setMoreMenuOpen(false); }}
           >
             <span className="text-lg leading-none">{t.icon}</span>
             <span className="text-[10px] font-semibold">{t.label}</span>
-            {t.key === "order" && cartCount > 0 && (
-              <span
-                className="absolute -top-0.5 right-1.5 pe-mono text-[9px] font-bold text-white rounded-full flex items-center justify-center"
-                style={{ background: "#B5652F", minWidth: 15, height: 15, padding: "0 3px" }}
-              >
-                {cartCount}
-              </span>
-            )}
           </button>
         ))}
+        <button
+          className="flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl relative"
+          style={{ color: moreMenuOpen || MORE_TABS.some((t) => t.key === tab) ? "#14403E" : "#948A78" }}
+          onClick={() => setMoreMenuOpen((v) => !v)}
+        >
+          <span className="text-lg leading-none">{moreMenuOpen ? "✕" : "➕"}</span>
+          <span className="text-[10px] font-semibold">More</span>
+          {cartCount > 0 && (
+            <span
+              className="absolute -top-0.5 right-1.5 pe-mono text-[9px] font-bold text-white rounded-full flex items-center justify-center"
+              style={{ background: "#B5652F", minWidth: 15, height: 15, padding: "0 3px" }}
+            >
+              {cartCount}
+            </span>
+          )}
+        </button>
       </div>
     </div>
   );
@@ -2006,17 +3658,27 @@ export default function Root() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
   const [profile, setProfile] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
+  const [profileError, setProfileError] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   const loadSessionAndProfile = useCallback(async () => {
+    setProfileError(false);
     const { data } = await supabase.auth.getSession();
     setSession(data.session || null);
     if (data.session) {
       setLoadingProfile(true);
       try {
-        const p = await getMyProfile(data.session.user.id);
+        let p = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          p = await getMyProfile(data.session.user.id);
+          if (p) break;
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
         setProfile(p);
+        if (!p) setProfileError(true);
       } catch (e) {
         console.error(e);
+        setProfileError(true);
       } finally {
         setLoadingProfile(false);
       }
@@ -2025,9 +3687,17 @@ export default function Root() {
 
   useEffect(() => {
     loadSessionAndProfile();
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecovery(true);
+        setSession(newSession);
+        return;
+      }
       setSession(newSession);
-      if (!newSession) setProfile(null);
+      if (!newSession) {
+        setProfile(null);
+        setProfileError(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, [loadSessionAndProfile]);
@@ -2035,6 +3705,8 @@ export default function Root() {
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     setProfile(null);
+    setProfileError(false);
+    setPasswordRecovery(false);
   };
 
   if (session === undefined) {
@@ -2045,8 +3717,39 @@ export default function Root() {
     );
   }
 
+  if (passwordRecovery) {
+    return (
+      <ResetPasswordScreen
+        onDone={() => {
+          setPasswordRecovery(false);
+          loadSessionAndProfile();
+        }}
+      />
+    );
+  }
+
   if (!session) {
     return <AuthScreen onAuthed={loadSessionAndProfile} />;
+  }
+
+  if (profileError) {
+    return (
+      <div className="pe-app flex items-center justify-center px-6" style={{ minHeight: "100vh" }}>
+        <div className="w-full max-w-sm text-center">
+          <div className="text-4xl mb-3">⚠️</div>
+          <p className="pe-display text-lg font-semibold mb-2" style={{ color: "#14403E" }}>
+            We couldn't find your account
+          </p>
+          <p className="text-sm mb-5" style={{ color: "#6B6355" }}>
+            You're signed in, but no profile is set up for this account yet. This can happen if sign-up was
+            interrupted partway through. Try signing out and creating your account again.
+          </p>
+          <button className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm" onClick={handleSignOut}>
+            Back to sign in
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (loadingProfile || !profile) {
@@ -2058,6 +3761,17 @@ export default function Root() {
   }
 
   if (profile.role === "coach") {
+    if (profile.is_super_admin) {
+      return (
+        <RootAdminOrCoach
+          profile={profile}
+          onSignOut={handleSignOut}
+        />
+      );
+    }
+    if (!profile.approved) {
+      return <PendingApprovalScreen email={profile.email} onSignOut={handleSignOut} />;
+    }
     return <CoachDashboard profile={profile} onSignOut={handleSignOut} />;
   }
 
@@ -2066,6 +3780,22 @@ export default function Root() {
       currentUserId={session.user.id}
       userEmail={session.user.email}
       onSignOut={handleSignOut}
+      coachId={profile.coach_id}
+      onProfileRefresh={loadSessionAndProfile}
+    />
+  );
+}
+
+function RootAdminOrCoach({ profile, onSignOut }) {
+  const [view, setView] = useState("admin"); // admin | coach
+  if (view === "coach") {
+    return <CoachDashboard profile={profile} onSignOut={onSignOut} onBackToAdmin={() => setView("admin")} />;
+  }
+  return (
+    <AdminApprovals
+      isAlsoCoach
+      onOpenCoachDashboard={() => setView("coach")}
+      onSignOut={onSignOut}
     />
   );
 }
