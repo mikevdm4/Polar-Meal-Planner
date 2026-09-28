@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient.js";
 import { signUp, signIn, getMyAthletes, getAthleteData, getPendingCoaches, approveCoach, rejectCoach, saveWeekPlan, getAthleteWeekPlan, saveFeedback, deleteFeedback, getAthleteFeedback } from "./auth.js";
+import { ErrorNotice } from "./ErrorNotice.jsx";
 import { computeTargets } from "./calculations.js";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
@@ -119,7 +120,7 @@ export function AuthScreen({ onAuthed }) {
             </p>
           )}
 
-          {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+          {error && <ErrorNotice className="mb-3">{error}</ErrorNotice>}
           {info && <p className="text-xs mb-3" style={{ color: "#4F6B41" }}>{info}</p>}
 
           <button
@@ -219,7 +220,7 @@ export function ResetPasswordScreen({ onDone }) {
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
           />
-          {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+          {error && <ErrorNotice className="mb-3">{error}</ErrorNotice>}
           <button
             className="pe-btn-primary w-full py-3 rounded-full font-semibold text-sm"
             onClick={submit}
@@ -332,7 +333,7 @@ export function AdminApprovals({ onOpenCoachDashboard, isAlsoCoach, onSignOut })
           Pending coaches ({pending.length})
         </h2>
 
-        {error && <p className="text-xs mb-3" style={{ color: "#B5652F" }}>{error}</p>}
+        {error && <ErrorNotice className="mb-3">{error}</ErrorNotice>}
         {loading && <p className="text-sm" style={{ color: "#948A78" }}>Loading…</p>}
 
         {!loading && pending.length === 0 && (
@@ -861,7 +862,7 @@ function WeekPlanner({ athleteId, coachId }) {
         {saveStatus === "saving" ? "Saving…" : "Save this week's suggestions"}
       </button>
       {saveStatus === "saved" && <p className="text-xs mt-2 text-center" style={{ color: "#4F6B41" }}>Saved — your athlete will see this in their app.</p>}
-      {saveStatus === "error" && <p className="text-xs mt-2 text-center" style={{ color: "#B5652F" }}>Couldn't save — try again.</p>}
+      {saveStatus === "error" && <ErrorNotice className="mt-2" center>Couldn't save — try again.</ErrorNotice>}
     </div>
   );
 }

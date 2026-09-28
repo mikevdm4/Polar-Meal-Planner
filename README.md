@@ -144,3 +144,14 @@ Not yet built, if useful later:
 - **Notifications** — e.g. a coach getting notified when an athlete logs something notable, or a coach being emailed when a new sign-up is awaiting their approval
 
 Each of these is a genuine but bounded addition on top of what's here now, rather than a re-architecture.
+
+## Testing before you deploy
+
+`npm run build` only catches syntax errors. A missing import or undefined variable only crashes when a screen
+actually renders (this is how a Settings-page crash once shipped). Run this before every deploy:
+
+    npm run smoke
+
+It mounts the real app in a simulated browser and opens every screen (Daily Log, Recipes, Plan, Gym, Order,
+Shop, Setup, Help & Guide, Cooking Guide, barcode scanner). It exits with an error and names the screen that
+crashed if anything is broken.

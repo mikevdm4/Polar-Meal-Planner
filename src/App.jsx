@@ -6,7 +6,8 @@ import { supabase } from "./supabaseClient.js";
 import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail, getMyWeekPlan, getMyFeedback } from "./auth.js";
 import { pullUserData } from "./authSync.js";
 import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
-import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros, fixedMacros, recipeMacros } from "./calculations.js";
+import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros, fixedMacros, recipeMacros, activeMealKeys, defaultMealPercents } from "./calculations.js";
+import { ErrorNotice, ReloadButton } from "./ErrorNotice.jsx";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
 
@@ -317,6 +318,10 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         is for typing a branded item's name instead (a protein bar, a cereal) when you don't have the packet to
         hand. Both pull from Open Food Facts, a free, community-maintained database — always worth a glance at
         the figures before adding, especially for less common products.</p>
+        <p><strong>If a scan says the product isn't found</strong>, the barcode itself was read correctly — that
+        product just isn't in the database yet. You can browse the same database (and add missing products to
+        it) at <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener noreferrer" className="underline font-semibold">world.openfoodfacts.org</a>,
+        or simply log it manually and carry on.</p>
         <p>Logging manually doesn't require the numbers up front — leave calories blank if you just want to
         record <em>what</em> and <em>when</em> you ate something, and add the nutrition info later by tapping
         "Add nutrition info" on that entry.</p>
@@ -633,7 +638,7 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
           </>
         )}
         {coachLinkStatus === "error" && (
-          <p className="text-xs mt-1" style={{ color: "#B5652F" }}>{coachLinkError}</p>
+          <ErrorNotice className="mt-1">{coachLinkError}</ErrorNotice>
         )}
         {coachLinkStatus === "success" && (
           <p className="text-xs mt-1" style={{ color: "#4F6B41" }}>Linked! Your coach can now see your progress.</p>
@@ -672,7 +677,7 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
                 {passwordStatus === "saving" ? "Saving…" : "Update password"}
               </button>
               {passwordStatus === "error" && (
-                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{passwordError}</p>
+                <ErrorNotice className="mt-1.5">{passwordError}</ErrorNotice>
               )}
               {passwordStatus === "success" && (
                 <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>Password updated.</p>
@@ -699,7 +704,7 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
                 {emailStatus === "saving" ? "Saving…" : "Send confirmation link"}
               </button>
               {emailStatus === "error" && (
-                <p className="text-xs mt-1.5" style={{ color: "#B5652F" }}>{emailError}</p>
+                <ErrorNotice className="mt-1.5">{emailError}</ErrorNotice>
               )}
               {emailStatus === "success" && (
                 <p className="text-xs mt-1.5" style={{ color: "#4F6B41" }}>
@@ -1553,15 +1558,36 @@ function extractProductNutrition(p) {
   };
 }
 
+class LookupError extends Error {
+  constructor(message, kind, barcode) {
+    super(message);
+    this.kind = kind; // "notfound" | "nodata" | "network"
+    this.barcode = barcode;
+  }
+}
+
 async function lookupBarcode(barcode) {
-  const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
-  if (!res.ok) throw new Error("Couldn't reach the barcode database — check your connection and try again.");
-  const data = await res.json();
-  if (data.status !== 1 || !data.product) {
-    throw new Error("No product found for that barcode — it may not be in the database yet. You can log it manually instead.");
+  let res;
+  try {
+    res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`);
+  } catch (e) {
+    throw new LookupError("Couldn't reach the product database — check your connection and try again.", "network", barcode);
+  }
+  // Open Food Facts signals an unknown barcode in more than one way: an HTTP 404,
+  // or a normal 200 response with status:0 in the body. Both mean "not in the database",
+  // and neither should be reported as a connection problem.
+  if (res.status === 404) {
+    throw new LookupError(`The barcode scanned fine (${barcode}), but that product isn't in the Open Food Facts database yet.`, "notfound", barcode);
+  }
+  if (!res.ok) throw new LookupError("The product database had a problem responding — try again in a moment.", "network", barcode);
+  const data = await res.json().catch(() => null);
+  if (!data || data.status !== 1 || !data.product) {
+    throw new LookupError(`The barcode scanned fine (${barcode}), but that product isn't in the Open Food Facts database yet.`, "notfound", barcode);
   }
   const product = extractProductNutrition(data.product);
-  if (!product) throw new Error("Found the product, but it has no nutrition data on file — you'll need to log it manually.");
+  if (!product) {
+    throw new LookupError(`Found "${data.product.product_name || "that product"}" (${barcode}), but it has no nutrition information on file.`, "nodata", barcode);
+  }
   return product;
 }
 
@@ -1571,7 +1597,12 @@ async function lookupBarcode(barcode) {
 // foods, which the app's own curated list already covers better.
 async function searchPackagedProducts(query) {
   const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=15`;
-  const res = await fetch(url);
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new Error("Couldn't reach the product database — check your connection and try again.");
+  }
   if (!res.ok) throw new Error("Couldn't reach the product database — check your connection and try again.");
   const data = await res.json();
   const products = (data.products || [])
@@ -1650,8 +1681,14 @@ function BarcodeScannerModal({ onScan, onClose }) {
           </div>
         )}
       </div>
+      {error && (
+        <p className="text-center text-xs text-white p-4 pb-0">
+          {error} If this keeps happening,{" "}
+          <button type="button" className="underline font-semibold" onClick={() => window.location.reload()}>reload the app page</button>.
+        </p>
+      )}
       <p className="text-center text-xs text-white opacity-70 p-4">
-        {error ||
+        {error ? "" :
           (secondsScanning > 8
             ? "Still looking — make sure the barcode is well lit, in focus, and fills the frame. Some barcodes (especially small or curved ones) take a few tries."
             : "Line up the barcode inside the frame — it'll scan automatically.")}
@@ -1753,6 +1790,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [scannedProduct, setScannedProduct] = useState(null);
   const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
   const [scanError, setScanError] = useState("");
+  const [scanErrorKind, setScanErrorKind] = useState("");
+  const [scanErrorBarcode, setScanErrorBarcode] = useState("");
   const [scannedGrams, setScannedGrams] = useState(100);
   const [scannedTime, setScannedTime] = useState(() => nowTimeStr());
   const [scannedMealType, setScannedMealType] = useState("Snack");
@@ -1792,6 +1831,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     } catch (e) {
       setScanStatus("error");
       setScanError(e.message);
+      setScanErrorKind(e.kind || "other");
+      setScanErrorBarcode(e.barcode || barcode);
     }
   };
 
@@ -2168,7 +2209,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
               {packagedStatus === "loading" ? "Searching…" : "Search"}
             </button>
             {packagedStatus === "error" && (
-              <p className="text-xs mt-2" style={{ color: "#B5652F" }}>{packagedError}</p>
+              <ErrorNotice className="mt-2">{packagedError}</ErrorNotice>
             )}
             {packagedResults.length > 0 && (
               <div className="mt-2 rounded-lg overflow-hidden" style={{ border: "1px solid #E4E1D6" }}>
@@ -2193,7 +2234,20 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         {scanStatus === "error" && (
           <div className="rounded-lg p-2.5 mb-3 text-xs" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
             <p className="mb-2">{scanError}</p>
-            <div className="flex gap-2">
+            {(scanErrorKind === "notfound" || scanErrorKind === "nodata") && (
+              <p className="mb-2">
+                It's a community-built database, so newer or less common products are sometimes missing.{" "}
+                <a
+                  href={`https://world.openfoodfacts.org/product/${encodeURIComponent(scanErrorBarcode)}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="underline font-semibold"
+                >
+                  Check or add it on Open Food Facts
+                </a>
+                , or log it manually below.
+              </p>
+            )}
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
               <button
                 className="text-xs font-semibold underline"
                 onClick={() => { setScanStatus(""); setScannerOpen(true); }}
@@ -2202,10 +2256,11 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
               </button>
               <button
                 className="text-xs font-semibold underline"
-                onClick={() => { setScanStatus(""); setManualOpen(true); }}
+                onClick={() => { setScanStatus(""); setManualOpen(true); manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
               >
                 Log manually instead
               </button>
+              {scanErrorKind === "network" && <ReloadButton />}
             </div>
           </div>
         )}
@@ -3799,3 +3854,5 @@ function RootAdminOrCoach({ profile, onSignOut }) {
     />
   );
 }
+
+export { AthleteApp, SetupScreen, DailyLogScreen };
