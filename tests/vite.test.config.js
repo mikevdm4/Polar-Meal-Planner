@@ -10,6 +10,7 @@ export default defineConfig({
     minify: false,
   },
   define: {
+    __APP_BUILD__: '"smoke-test"',
     "process.env.NODE_ENV": '"development"',
     "import.meta.env.VITE_SUPABASE_URL": '"https://test.supabase.co"',
     "import.meta.env.VITE_SUPABASE_ANON_KEY": '"test-anon-key"',

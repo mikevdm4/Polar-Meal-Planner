@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
+import { hardReload, APP_VERSION } from "./ErrorNotice.jsx";
 import "./index.css";
 
 // Without this, ANY uncaught error anywhere in the app — a bad API response,
@@ -35,11 +36,12 @@ class ErrorBoundary extends React.Component {
             if it keeps happening, please let your coach know what you were doing right before this appeared.
           </p>
           <button
-            onClick={() => window.location.reload()}
+            onClick={hardReload}
             style={{ background: "#14403E", color: "#fff", border: "none", padding: "10px 24px", borderRadius: "999px", fontSize: "14px", fontWeight: 600, cursor: "pointer" }}
           >
             Reload the app
           </button>
+          <p style={{ fontSize: "11px", color: "#948A78", marginTop: "16px" }}>Version {APP_VERSION}</p>
         </div>
       );
     }

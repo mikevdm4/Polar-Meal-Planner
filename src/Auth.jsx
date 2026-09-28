@@ -2,6 +2,9 @@ import React, { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient.js";
 import { signUp, signIn, getMyAthletes, getAthleteData, getPendingCoaches, approveCoach, rejectCoach, saveWeekPlan, getAthleteWeekPlan, saveFeedback, deleteFeedback, getAthleteFeedback } from "./auth.js";
 import { ErrorNotice } from "./ErrorNotice.jsx";
+import { DeleteAccountCard } from "./DeleteAccount.jsx";
+import { formatAmount } from "./servings.js";
+import { weeklyRate, weightInRange, formatDate } from "./logHelpers.js";
 import { computeTargets } from "./calculations.js";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
@@ -516,6 +519,7 @@ export function CoachDashboard({ profile, onSignOut, onBackToAdmin }) {
             )}
           </>
         )}
+        <DeleteAccountCard isCoach />
       </div>
     </div>
   );
@@ -581,6 +585,14 @@ function AthleteSummary({ data, athleteId, coachId }) {
   };
   const round = (n) => Math.round(n || 0);
 
+  // Weight progress from their weigh-ins (last 30 days) — separate from the bodyweight their targets use.
+  const weightLog = Array.isArray(data.pe_weight_log) ? data.pe_weight_log : [];
+  const recentWeights = weightInRange(weightLog, formatDate(new Date()), 30);
+  const latestWeight = weightLog.length ? weightLog[weightLog.length - 1] : null;
+  const weightChange = recentWeights.length > 1 ? latestWeight.kg - recentWeights[0].kg : null;
+  const weightRate = weeklyRate(recentWeights);
+  const fmt = (n) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(1)}`;
+
   return (
     <div>
       <div className="pe-card p-4 mb-4">
@@ -590,6 +602,18 @@ function AthleteSummary({ data, athleteId, coachId }) {
           <div><span style={{ color: "#948A78" }}>Goal:</span> {profile.goal || "—"}</div>
           <div><span style={{ color: "#948A78" }}>Structure:</span> {profile.structure || "—"}</div>
           <div><span style={{ color: "#948A78" }}>Calorie adj:</span> {profile.adjustment || 0}</div>
+        </div>
+        <div className="text-sm mt-3 pt-3" style={{ borderTop: "1px solid #EFEBE0" }}>
+          <span style={{ color: "#948A78" }}>Weigh-ins:</span>{" "}
+          {latestWeight ? (
+            <>
+              <strong>{latestWeight.kg.toFixed(1)} kg</strong> on {latestWeight.date}
+              {weightChange != null && <> · {fmt(weightChange)} kg over 30 days</>}
+              {weightRate != null && <> · {fmt(weightRate)} kg/week</>}
+            </>
+          ) : (
+            <span style={{ color: "#948A78" }}>none logged yet</span>
+          )}
         </div>
       </div>
 
@@ -683,7 +707,7 @@ function AthleteSummary({ data, athleteId, coachId }) {
                   {entries.map((e, i) => {
                     const m = entryMacros(e);
                     const name = e.type === "food" ? e.food.name : e.type === "manual" ? e.name : e.name;
-                    const qty = e.type === "food" ? `${e.grams}g` : e.type === "manual" ? "manual" : `${e.servings || 1}x`;
+                    const qty = e.type === "food" ? formatAmount(e) : e.type === "manual" ? "manual" : `${e.servings || 1}x`;
                     return (
                       <div key={i} className="flex justify-between text-xs pe-divider pt-1" style={{ color: "#40473F" }}>
                         <span>{e.time ? `${e.time} · ` : ""}{name} <span style={{ color: "#948A78" }}>({qty})</span></span>
@@ -866,3 +890,6 @@ function WeekPlanner({ athleteId, coachId }) {
     </div>
   );
 }
+
+// Exposed so the coach-side summary can be rendered directly by tests/smoke.mjs.
+export { AthleteSummary };

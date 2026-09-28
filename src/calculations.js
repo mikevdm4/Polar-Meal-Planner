@@ -63,23 +63,50 @@ export function mealTarget(sectionName, targets) {
 }
 
 export function scaledMacros(item, target) {
-  const usesFixedProtein = !!item.fixedProteinGrams;
-  const proteinPortion = usesFixedProtein
-    ? item.fixedProteinGrams
-    : target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : 0;
-  const proteinTargetEquivalent =
-    usesFixedProtein && target && item.proteinPer100 ? target.protein / (item.proteinPer100 / 100) : null;
-
-  const usesFixedCarb = !!item.fixedCarbGrams;
-  const carbPortion = usesFixedCarb
-    ? item.fixedCarbGrams
-    : target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : 0;
-  const carbTargetEquivalent =
-    usesFixedCarb && target && item.carbPer100 ? target.carbs / (item.carbPer100 / 100) : null;
-
-  const proteinG = (proteinPortion * item.proteinPer100) / 100;
-  const carbG = (carbPortion * item.carbPer100) / 100;
   const extras = item.extras || [];
+  // Extras (avocado, eggs, coconut milk, peas...) carry protein and carbs too. The meal's
+  // target has to cover EVERYTHING on the plate, so the main protein/carb portions are sized
+  // for what's left after the extras. Floored at 50% so a protein- or carb-rich extra can never
+  // shrink the main portion to nothing.
+  const extrasProtein = extras.reduce((sum, e) => sum + (e.grams * (e.proteinPer100 || 0)) / 100, 0);
+  const extrasCarbs = extras.reduce((sum, e) => sum + (e.grams * (e.carbPer100 || 0)) / 100, 0);
+  const proteinForMain = target ? Math.max(target.protein - extrasProtein, target.protein * 0.5) : 0;
+  const carbForMain = target ? Math.max(target.carbs - extrasCarbs, target.carbs * 0.5) : 0;
+
+  // Every food carries a bit of everything: a carb source (rice, oats, bread) has protein in it and a
+  // protein source (yoghurt, beans, tofu) has carbs in it. Counting only the "main" macro of each food
+  // under-reports protein by ~12g a meal. The two portions are solved together (a few quick passes is
+  // plenty, the cross terms are small) so the whole plate lands on the meal's target.
+  const pCarb = item.proteinCarbPer100 || 0; // carbs inside the protein source, per 100g
+  const cProt = item.carbProteinPer100 || 0; // protein inside the carb source, per 100g
+  const usesFixedProtein = !!item.fixedProteinGrams;
+  const usesFixedCarb = !!item.fixedCarbGrams;
+  const canSizeProtein = !!(target && item.proteinPer100);
+  const canSizeCarb = !!(target && item.carbPer100);
+
+  let proteinPortion = usesFixedProtein ? item.fixedProteinGrams : 0;
+  let carbPortion = usesFixedCarb ? item.fixedCarbGrams : canSizeCarb ? carbForMain / (item.carbPer100 / 100) : 0;
+  for (let pass = 0; pass < 6; pass++) {
+    if (!usesFixedProtein && canSizeProtein) {
+      const need = Math.max(proteinForMain - (carbPortion * cProt) / 100, proteinForMain * 0.3);
+      proteinPortion = need / (item.proteinPer100 / 100);
+    }
+    if (!usesFixedCarb && canSizeCarb) {
+      const need = Math.max(carbForMain - (proteinPortion * pCarb) / 100, carbForMain * 0.3);
+      carbPortion = need / (item.carbPer100 / 100);
+    }
+  }
+  // What a full-target portion of the capped food WOULD be (used for the "unrealistic portion" advice)
+  const proteinTargetEquivalent =
+    usesFixedProtein && canSizeProtein
+      ? Math.max(proteinForMain - (carbPortion * cProt) / 100, 0) / (item.proteinPer100 / 100) : null;
+  const carbTargetEquivalent =
+    usesFixedCarb && canSizeCarb
+      ? Math.max(carbForMain - (proteinPortion * pCarb) / 100, 0) / (item.carbPer100 / 100) : null;
+
+  // proteinG / carbG are the WHOLE meal's totals (both main foods + extras) so they tally with calories.
+  const proteinG = (proteinPortion * item.proteinPer100) / 100 + (carbPortion * cProt) / 100 + extrasProtein;
+  const carbG = (carbPortion * item.carbPer100) / 100 + (proteinPortion * pCarb) / 100 + extrasCarbs;
   const extrasCalories = extras.reduce((sum, e) => sum + (e.grams * e.kcalPer100) / 100, 0);
   const extrasFat = extras.reduce((sum, e) => sum + (e.grams * (e.fatPer100 || 0)) / 100, 0);
   const calories =
@@ -93,6 +120,8 @@ export function scaledMacros(item, target) {
   return {
     proteinPortion, carbPortion, proteinG, carbG, calories, fat,
     usesFixedProtein, proteinTargetEquivalent, usesFixedCarb, carbTargetEquivalent,
+    extrasProtein, extrasCarbs,
+    proteinTarget: target ? target.protein : null, carbTarget: target ? target.carbs : null,
   };
 }
 

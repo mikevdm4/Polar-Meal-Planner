@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { Html5Qrcode } from "html5-qrcode";
 import { RECIPE_DATA, FOOD_LIST } from "./data.js";
 import { schedulePushUserData, pushUserData } from "./authSync.js";import { isGlutenFree, isDairyFree, dietarySwaps } from "./dietaryTags.js";
 import { supabase } from "./supabaseClient.js";
@@ -7,7 +6,15 @@ import { getMyProfile, linkCoach, unlinkCoach, changePassword, changeEmail, getM
 import { pullUserData } from "./authSync.js";
 import { AuthScreen, CoachDashboard, ResetPasswordScreen, PendingApprovalScreen, AdminApprovals } from "./Auth.jsx";
 import { STRUCTURES, SECTION_MEAL_TYPE, computeTargets, mealTarget, scaledMacros, fixedMacros, recipeMacros, activeMealKeys, defaultMealPercents } from "./calculations.js";
-import { ErrorNotice, ReloadButton } from "./ErrorNotice.jsx";
+import { ErrorNotice, ReloadButton, hardReload, APP_VERSION } from "./ErrorNotice.jsx";
+import { servingsFor, gramsFrom, formatAmount } from "./servings.js";
+import { buildRecents, templateFromEntry, cloneEntries, groupByMeal, mealLabel, shiftDate, entryKey, upsertWeight } from "./logHelpers.js";
+import { FoodQuantity, defaultQuantity } from "./QuantityInput.jsx";
+import { QuickAddCard } from "./QuickAdd.jsx";
+import { WeightScreen } from "./WeightScreen.jsx";
+import { BarcodeScannerModal } from "./BarcodeScanner.jsx";
+import { normalizeBarcode } from "./barcode.js";
+import { DeleteAccountCard } from "./DeleteAccount.jsx";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
 
 
@@ -92,6 +99,20 @@ const DEFAULT_PROFILE = {
 
 function round(n) {
   return Math.round(n || 0);
+}
+
+// Turns "this meal is Xg short on protein" into something you can actually do: how much whey or
+// Greek yoghurt would close it, rounded to a sensible amount to weigh out.
+function proteinTopUp(shortfallG) {
+  if (!shortfallG || shortfallG < 3) return null;
+  const whey = FOOD_LIST.find((f) => f.name === "Vanilla protein powder (whey)");
+  const yog = FOOD_LIST.find((f) => f.name === "Greek yoghurt (0%)");
+  const to5 = (g) => Math.max(5, Math.round(g / 5) * 5);
+  return {
+    shortfall: Math.round(shortfallG),
+    wheyG: whey ? to5(shortfallG / (whey.protein / 100)) : null,
+    yoghurtG: yog ? to5(shortfallG / (yog.protein / 100)) : null,
+  };
 }
 
 // The "Also:" line under a recipe's tracked ingredients is meant for genuine
@@ -318,6 +339,11 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         is for typing a branded item's name instead (a protein bar, a cereal) when you don't have the packet to
         hand. Both pull from Open Food Facts, a free, community-maintained database — always worth a glance at
         the figures before adding, especially for less common products.</p>
+        <p><strong>If the camera won't read a barcode</strong>, the scanner screen has two backups under the camera:
+        <strong> take a photo of the barcode</strong> (your phone's own camera app focuses better than a live view, so it
+        often reads what the live view can't), or <strong>type the number printed under the bars</strong> — it checks the
+        last digit for you, so a mistyped number is caught straight away. Hold the barcode 15–25cm away in good light with
+        the bars filling most of the frame.</p>
         <p><strong>If a scan says the product isn't found</strong>, the barcode itself was read correctly — that
         product just isn't in the database yet. You can browse the same database (and add missing products to
         it) at <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener noreferrer" className="underline font-semibold">world.openfoodfacts.org</a>,
@@ -333,8 +359,19 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         digestion, or mood alongside what you ate — useful for spotting patterns over time.</p>
         <p>If your coach has left you feedback on a specific day, it shows here too — a <strong>"💬 Feedback
         from your coach"</strong> card appears automatically when you're viewing that date.</p>
-        <p>The <strong>Trends</strong> chart shows your last week or month at a glance, with workout-related
-        nutrition shown in a separate colour from everyday meals.</p>
+        <p><strong>Quick add</strong> sits at the top of the logging area. <strong>Recent</strong> lists the foods and
+        meals you've logged lately — tap <strong>+</strong> to add the same thing again in one tap (same amount,
+        time set to now). Tap the <strong>☆</strong> next to anything (here or in your log below) to save it as a
+        <strong> Favourite</strong>, which stays put until you remove it. <strong>📋 Copy yesterday</strong> copies the
+        previous day's entries into the day you're viewing — everything, or just one meal like breakfast.</p>
+        <p>You don't have to weigh everything: when you pick a food you can log <strong>"2 × medium banana"</strong> or
+        "1 slice", "1 scoop", "1 tbsp", "1 pint" and so on from the unit dropdown, and it shows the grams and calories
+        it works out to. Choose <strong>grams</strong> whenever you've actually weighed it. Scanned products offer the
+        pack's own <strong>serving</strong> size when the database has one.</p>
+        <p>The <strong>Trends</strong> chart shows your last week or month at a glance — switch between
+        <strong> Calories, Protein, Carbs and Fat</strong> to see each one against its target, along with your average
+        and how many days landed within 10% of target. On the calories view, workout-related nutrition is shown in a
+        separate colour from everyday meals.</p>
         <p>Tap <strong>⬇ Export</strong> at the top to download your entire log history (every day, every entry,
         every note) as a spreadsheet.</p>
       </Section>
@@ -350,6 +387,23 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         picked recipe straight into your cart in one go — head to Shopping afterward for the combined list.</p>
         <p>If your coach has suggested meals for the week, those show up automatically in your Daily Log as
         well, separate from your own plan here.</p>
+      </Section>
+
+      <Section title="⚖ Weight — tracking it over time">
+        <p>Open <strong>More → Weight</strong> and log a weigh-in whenever you like (you can back-date one too). Day-to-day
+        swings of a kilo or so are normal — water, salt and what's still in your gut — so the chart draws your
+        <strong> 7-day average</strong> as the dark line: that's the trend that matters. You'll also see your latest
+        weight, the change over the period, and your rate of change per week once you have a week or more of data.</p>
+        <p>Your food targets use the bodyweight in Setup. If your latest weigh-in has drifted 0.5 kg or more from it, the
+        Weight screen offers a one-tap <strong>"Update my targets"</strong> — it never changes your targets on its own.
+        If you have a coach, they can see your weigh-in progress too.</p>
+      </Section>
+
+      <Section title="🗑 Deleting your account">
+        <p>Go to <strong>More → Setup</strong>, scroll to the bottom and open <strong>Delete my account</strong>. You'll
+        need to type DELETE to confirm. It permanently removes your login and everything stored with it — food log, weight
+        and water history, notes, favourites, plans and orders — and can't be undone. If you'd like a copy first, tap
+        <strong> ⬇ Export</strong> on the Daily Log screen (it includes your weigh-ins).</p>
       </Section>
 
       <Section title="🔄 Syncing & working offline">
@@ -717,6 +771,10 @@ function SetupScreen({ profile, setProfile, userEmail, onSignOut, syncStatus, is
       </div>
 
       <TargetsSummary profile={profile} />
+
+      <DeleteAccountCard />
+
+      <p className="text-center text-[11px] mt-6" style={{ color: "#B8B2A0" }}>App version {APP_VERSION}</p>
     </div>
   );
 }
@@ -900,9 +958,18 @@ function splitDayCalories(entries) {
   return { daily, workout };
 }
 
+const TREND_METRICS = {
+  calories: { label: "Calories", unit: "kcal", color: "#E08D52", target: (t) => t.calories },
+  protein: { label: "Protein", unit: "g", color: "#6FA968", target: (t) => t.protein },
+  carbs: { label: "Carbs", unit: "g", color: "#4FA3AC", target: (t) => t.carbs },
+  fat: { label: "Fat", unit: "g", color: "#A67FC0", target: (t) => t.fat },
+};
+
 function TrendsChart({ logsByDate, targets }) {
   const [range, setRange] = useState("week"); // week | month
+  const [metric, setMetric] = useState("calories");
   const days = range === "week" ? 7 : 30;
+  const meta = TREND_METRICS[metric];
 
   const data = useMemo(() => {
     const today = new Date();
@@ -910,15 +977,23 @@ function TrendsChart({ logsByDate, targets }) {
     for (let i = days - 1; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(d.getDate() - i);
-      const key = dateStr(d);
-      const { daily, workout } = splitDayCalories(logsByDate[key]);
-      out.push({ date: d, daily, workout, total: daily + workout });
+      const entries = logsByDate[dateStr(d)] || [];
+      if (metric === "calories") {
+        const { daily, workout } = splitDayCalories(entries);
+        out.push({ date: d, daily, workout, total: daily + workout, logged: entries.length > 0 });
+      } else {
+        const total = entries.reduce((sum, e) => sum + (entryMacros(e)[metric] || 0), 0);
+        out.push({ date: d, daily: total, workout: 0, total, logged: entries.length > 0 });
+      }
     }
     return out;
-  }, [logsByDate, days]);
+  }, [logsByDate, days, metric]);
 
-  const baseline = targets.calories;
+  const baseline = meta.target(targets);
   const maxVal = Math.max(baseline * 1.3, ...data.map((d) => d.total), 1);
+  const loggedDays = data.filter((d) => d.logged);
+  const avg = loggedDays.length ? loggedDays.reduce((s, d) => s + d.total, 0) / loggedDays.length : 0;
+  const onTarget = loggedDays.filter((d) => d.total >= baseline * 0.9 && d.total <= baseline * 1.1).length;
 
   const chartWidth = 320;
   const chartHeight = 140;
@@ -926,6 +1001,7 @@ function TrendsChart({ logsByDate, targets }) {
   const barWidth = Math.max(1.5, chartWidth / days - barGap);
   const scaleY = (val) => (val / maxVal) * chartHeight;
   const baselineY = chartHeight - scaleY(baseline);
+  const barColor = metric === "calories" ? "#14403E" : meta.color;
 
   return (
     <div className="pe-card p-4 mb-4">
@@ -944,7 +1020,20 @@ function TrendsChart({ logsByDate, targets }) {
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${chartWidth} ${chartHeight + 10}`} className="w-full" style={{ maxHeight: 160 }}>
+      <div className="flex gap-1.5 mb-3 flex-wrap">
+        {Object.entries(TREND_METRICS).map(([k, m]) => (
+          <button
+            key={k}
+            className="text-xs font-semibold px-3 py-1 rounded-full"
+            style={metric === k ? { background: m.color, color: "#fff" } : { background: "#EDE9DD", color: "#14403E" }}
+            onClick={() => setMetric(k)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      <svg viewBox={`0 0 ${chartWidth} ${chartHeight + 14}`} className="w-full" style={{ maxHeight: 174 }}>
         <line
           x1="0" y1={baselineY} x2={chartWidth} y2={baselineY}
           stroke="#B5652F" strokeWidth="1" strokeDasharray="4,3"
@@ -955,28 +1044,52 @@ function TrendsChart({ logsByDate, targets }) {
           const workoutH = scaleY(d.workout);
           return (
             <g key={i}>
-              <rect x={x} y={chartHeight - dailyH} width={barWidth} height={dailyH} fill="#14403E" rx="1" />
+              <rect x={x} y={chartHeight - dailyH} width={barWidth} height={dailyH} fill={barColor} rx="1" />
               <rect x={x} y={chartHeight - dailyH - workoutH} width={barWidth} height={workoutH} fill="#B5652F" rx="1" />
+              {range === "week" && (
+                <text x={x + barWidth / 2} y={chartHeight + 11} fontSize="9" textAnchor="middle" fill="#948A78">
+                  {d.date.toLocaleDateString("en-GB", { weekday: "narrow" })}
+                </text>
+              )}
             </g>
           );
         })}
       </svg>
 
-      <div className="flex items-center gap-4 mt-2 text-[11px]" style={{ color: "#6B6355" }}>
+      <div className="grid grid-cols-2 gap-2 mt-2">
+        <div className="rounded-lg py-2 text-center" style={{ background: "#F5F4EE" }}>
+          <div className="pe-mono text-sm font-semibold" style={{ color: "#14403E" }}>
+            {loggedDays.length ? `${round(avg)} ${meta.unit}` : "—"}
+          </div>
+          <div className="text-[10px]" style={{ color: "#948A78" }}>Average on days logged (target {round(baseline)})</div>
+        </div>
+        <div className="rounded-lg py-2 text-center" style={{ background: "#F5F4EE" }}>
+          <div className="pe-mono text-sm font-semibold" style={{ color: "#14403E" }}>
+            {loggedDays.length ? `${onTarget} of ${loggedDays.length}` : "—"}
+          </div>
+          <div className="text-[10px]" style={{ color: "#948A78" }}>Days within 10% of target</div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 mt-2 text-[11px] flex-wrap" style={{ color: "#6B6355" }}>
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: "#14403E" }} /> Daily meals
+          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: barColor }} /> {metric === "calories" ? "Daily meals" : meta.label}
         </span>
+        {metric === "calories" && (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: "#B5652F" }} /> Workout nutrition
+          </span>
+        )}
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: "#B5652F" }} /> Workout nutrition
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-3 border-t border-dashed" style={{ borderColor: "#B5652F" }} /> Target ({round(baseline)} kcal)
+          <span className="inline-block w-3 border-t border-dashed" style={{ borderColor: "#B5652F" }} /> Target ({round(baseline)} {meta.unit})
         </span>
       </div>
-      <p className="text-[11px] mt-2" style={{ color: "#948A78" }}>
-        The target line is your main daily-eating baseline — pre-gym snacks and recovery meals/smoothies stack
-        on top of it separately, since training days are expected to need more.
-      </p>
+      {metric === "calories" && (
+        <p className="text-[11px] mt-2" style={{ color: "#948A78" }}>
+          The target line is your main daily-eating baseline — pre-gym snacks and recovery meals/smoothies stack
+          on top of it separately, since training days are expected to need more.
+        </p>
+      )}
     </div>
   );
 }
@@ -1116,6 +1229,15 @@ function entryMacros(entry) {
   };
 }
 
+// A recipe entry stores the macros it had when it was logged. When re-logging or copying one, recompute
+// from the recipe against the CURRENT targets (bodyweight may have changed) — unless the protein was swapped,
+// in which case the stored numbers are the only record of what was actually eaten.
+function refreshedEntry(entry, profile) {
+  if (entry.type !== "recipe" || entry.proteinOverride) return entry;
+  const m = recipeMacros(RECIPE_DATA, entry.section, entry.name, computeTargets(profile));
+  return m ? { ...entry, baseCalories: m.calories, baseProtein: m.protein, baseCarbs: m.carbs, baseFat: m.fat } : entry;
+}
+
 function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
   const sectionList = sections || SECTION_ORDER;
   const [section, setSection] = useState(sectionList[0]);
@@ -1174,10 +1296,14 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
     const newProteinCal = (grams * swapFood.kcal) / 100;
     const newProteinFat = (grams * swapFood.fat) / 100;
     const newProteinG = (grams * swapFood.protein) / 100;
+    const newProteinCarbs = (grams * swapFood.carb) / 100;
+    // Swap ONLY the protein source: keep the protein/carbs from the carb source and extras as they were.
+    const originalProteinG = (baseMacros.proteinPortion * pendingItem.proteinPer100) / 100;
+    const originalProteinCarbs = (baseMacros.proteinPortion * (pendingItem.proteinCarbPer100 || 0)) / 100;
     return {
       calories: baseMacros.calories - originalProteinCal + newProteinCal,
-      protein: newProteinG,
-      carbs: baseCarbs,
+      protein: baseProtein - originalProteinG + newProteinG,
+      carbs: baseCarbs - originalProteinCarbs + newProteinCarbs,
       fat: baseMacros.fat - originalProteinFat + newProteinFat,
     };
   }, [pendingItem, baseMacros, isFixed, customizeOpen, customProteinFood, customProteinGrams, baseProtein, baseCarbs]);
@@ -1295,7 +1421,10 @@ function AddMealLog({ profile, onAdd, sections, onViewRecipe }) {
             <div className="rounded-lg p-2.5 mb-3 text-[11px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
               This uses a normal serving of {pendingItem.proteinFood.toLowerCase()} ({round(baseMacros.proteinPortion)}g) rather than scaling it
               to your full protein target (which would need ~{round(baseMacros.proteinTargetEquivalent)}g — unrealistic as a single portion).
-              Consider pairing with an extra protein source to close the gap.
+              {(() => {
+                const t = proteinTopUp(baseMacros.proteinTarget - baseMacros.proteinG);
+                return t ? ` You'd be about ${t.shortfall}g short — roughly ${t.wheyG}g of whey or ${t.yoghurtG}g of Greek yoghurt would close it.` : " Consider pairing with an extra protein source.";
+              })()}
             </div>
           )}
           {baseMacros && baseMacros.usesFixedCarb && baseMacros.carbTargetEquivalent && (
@@ -1555,6 +1684,9 @@ function extractProductNutrition(p) {
     protein: Math.round((n["proteins_100g"] || 0) * 10) / 10,
     carb: Math.round((n["carbohydrates_100g"] || 0) * 10) / 10,
     fat: Math.round((n["fat_100g"] || 0) * 10) / 10,
+    // The barcode database often knows the pack's serving size — offered as a unit so you can log "1 serving".
+    servingG: Number(p.serving_quantity) > 0 && Number(p.serving_quantity) <= 2000 ? Number(p.serving_quantity) : null,
+    servingText: p.serving_size || "",
   };
 }
 
@@ -1569,7 +1701,7 @@ class LookupError extends Error {
 async function lookupBarcode(barcode) {
   let res;
   try {
-    res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`);
+    res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(normalizeBarcode(barcode))}.json`);
   } catch (e) {
     throw new LookupError("Couldn't reach the product database — check your connection and try again.", "network", barcode);
   }
@@ -1613,91 +1745,7 @@ async function searchPackagedProducts(query) {
 }
 
 
-function BarcodeScannerModal({ onScan, onClose }) {
-  const scannerRef = useRef(null);
-  const startedRef = useRef(false);
-  const [error, setError] = useState("");
-  const [found, setFound] = useState(false);
-  const [secondsScanning, setSecondsScanning] = useState(0);
-
-  useEffect(() => {
-    const scanner = new Html5Qrcode("barcode-reader");
-    scannerRef.current = scanner;
-    scanner
-      .start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 260, height: 160 } },
-        (decodedText) => {
-          if (found) return; // ignore any further detections once we've already caught one
-          setFound(true);
-          startedRef.current = false;
-          try { scanner.stop().catch(() => {}); } catch (e) { /* already stopped/never started */ }
-          // Brief, unmissable confirmation before handing off — otherwise the
-          // modal just vanishes instantly and it's genuinely unclear whether
-          // anything happened at all, which is exactly what was being reported.
-          setTimeout(() => onScan(decodedText), 500);
-        },
-        () => {} // fires continuously while no code is found — not a real error, just "still looking"
-      )
-      .then(() => { startedRef.current = true; })
-      .catch(() => setError("Couldn't access the camera — check camera permissions for this site."));
-
-    return () => {
-      if (startedRef.current) {
-        try {
-          scanner.stop().catch(() => {});
-        } catch (e) {
-          // already stopped, or the underlying camera stream is gone — safe to ignore
-        }
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (found || error) return;
-    const timer = setInterval(() => setSecondsScanning((s) => s + 1), 1000);
-    return () => clearInterval(timer);
-  }, [found, error]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#0F1210" }}>
-      <div className="flex items-center justify-between p-4">
-        <span className="text-sm font-semibold text-white">Scan a barcode</span>
-        <button className="text-white text-2xl leading-none" onClick={onClose}>×</button>
-      </div>
-      <div className="flex-1 mx-4 rounded-xl overflow-hidden relative" style={{ background: "#000" }}>
-        <div id="barcode-reader" className="w-full h-full" />
-        {found && (
-          <div className="pe-fadein absolute inset-0 flex flex-col items-center justify-center" style={{ background: "rgba(15,18,16,0.9)" }}>
-            <div className="text-4xl mb-2">✅</div>
-            <div className="text-white text-sm font-semibold">Barcode found!</div>
-            <div className="text-white text-xs opacity-70 mt-1">Looking it up…</div>
-          </div>
-        )}
-        {!found && !error && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "rgba(0,0,0,0.55)" }}>
-            <span className="inline-block w-2 h-2 rounded-full pe-pulse" style={{ background: "#6FA968" }} />
-            <span className="text-white text-xs font-medium">Scanning…</span>
-          </div>
-        )}
-      </div>
-      {error && (
-        <p className="text-center text-xs text-white p-4 pb-0">
-          {error} If this keeps happening,{" "}
-          <button type="button" className="underline font-semibold" onClick={() => window.location.reload()}>reload the app page</button>.
-        </p>
-      )}
-      <p className="text-center text-xs text-white opacity-70 p-4">
-        {error ? "" :
-          (secondsScanning > 8
-            ? "Still looking — make sure the barcode is well lit, in focus, and fills the frame. Some barcodes (especially small or curved ones) take a few tries."
-            : "Line up the barcode inside the frame — it'll scan automatically.")}
-      </p>
-    </div>
-  );
-}
-
-function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater, quickAction, onQuickActionHandled }) {
+function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onViewRecipe, dayNotes, updateDayNotes, waterByDate, updateWater, quickAction, onQuickActionHandled, favourites = [], toggleFavourite = () => {} }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [coachFeedback, setCoachFeedback] = useState({});
   useEffect(() => {
@@ -1705,7 +1753,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   }, []);
   const [query, setQuery] = useState("");
   const [pendingFood, setPendingFood] = useState(null);
-  const [pendingGrams, setPendingGrams] = useState(100);
+  const [pendingGrams, setPendingGrams] = useState("100"); // the QUANTITY (grams, or a count of the chosen unit)
+  const [pendingUnit, setPendingUnit] = useState("g");
   const [pendingTime, setPendingTime] = useState(() => nowTimeStr());
   const [pendingMealType, setPendingMealType] = useState("Snack");
   const [manualOpen, setManualOpen] = useState(false);
@@ -1792,7 +1841,8 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [scanError, setScanError] = useState("");
   const [scanErrorKind, setScanErrorKind] = useState("");
   const [scanErrorBarcode, setScanErrorBarcode] = useState("");
-  const [scannedGrams, setScannedGrams] = useState(100);
+  const [scannedGrams, setScannedGrams] = useState("100"); // the QUANTITY (grams, or a count of the chosen unit)
+  const [scannedUnit, setScannedUnit] = useState("g");
   const [scannedTime, setScannedTime] = useState(() => nowTimeStr());
   const [scannedMealType, setScannedMealType] = useState("Snack");
 
@@ -1825,7 +1875,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     try {
       const product = await lookupBarcode(barcode);
       setScannedProduct(product);
-      setScannedGrams(100);
+      { const d = defaultQuantity(product); setScannedGrams(d.qty); setScannedUnit(d.unit); }
       setScannedTime(nowTimeStr());
       setScanStatus("");
     } catch (e) {
@@ -1838,13 +1888,16 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
   const addScannedProduct = () => {
     if (!scannedProduct) return;
+    const grams = gramsFrom(scannedGrams, scannedUnit, servingsFor(scannedProduct)) || 100;
     updateDayLog(selectedDate, [
       ...dayLog,
       {
         id: Date.now(), type: "food",
         food: { name: scannedProduct.brand ? `${scannedProduct.name} (${scannedProduct.brand})` : scannedProduct.name,
-                kcal: scannedProduct.kcal, protein: scannedProduct.protein, carb: scannedProduct.carb, fat: scannedProduct.fat },
-        grams: Number(scannedGrams) || 100,
+                kcal: scannedProduct.kcal, protein: scannedProduct.protein, carb: scannedProduct.carb, fat: scannedProduct.fat,
+                servingG: scannedProduct.servingG || null },
+        grams,
+        ...(scannedUnit !== "g" ? { qty: Number(scannedGrams), unitLabel: scannedUnit } : {}),
         time: scannedTime,
         mealType: scannedMealType,
       },
@@ -1853,13 +1906,19 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   };
 
   const addFood = () => {
-    if (!pendingFood || !pendingGrams) return;
+    if (!pendingFood) return;
+    const grams = gramsFrom(pendingGrams, pendingUnit, servingsFor(pendingFood));
+    if (!(grams > 0)) return;
+    // qty/unitLabel are only stored when a serving size was used ("2 × medium"); grams is always the truth.
+    const amount = pendingUnit !== "g"
+      ? { qty: Number(pendingGrams), unitLabel: pendingUnit }
+      : { qty: undefined, unitLabel: undefined };
     if (editingFoodEntryId) {
       updateDayLog(
         selectedDate,
         dayLog.map((e) =>
           e.id === editingFoodEntryId
-            ? { ...e, food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType }
+            ? { ...e, food: pendingFood, grams, ...amount, time: pendingTime, mealType: pendingMealType }
             : e
         )
       );
@@ -1867,22 +1926,55 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     } else {
       updateDayLog(selectedDate, [
         ...dayLog,
-        { id: Date.now(), type: "food", food: pendingFood, grams: Number(pendingGrams), time: pendingTime, mealType: pendingMealType },
+        { id: Date.now(), type: "food", food: pendingFood, grams, ...amount, time: pendingTime, mealType: pendingMealType },
       ]);
     }
     setPendingFood(null);
     setQuery("");
-    setPendingGrams(100);
+    setPendingGrams("100");
+    setPendingUnit("g");
     setPendingTime(nowTimeStr());
   };
 
   const openEditFoodEntry = (entry) => {
     setPendingFood(entry.food);
     setQuery(entry.food.name);
-    setPendingGrams(entry.grams);
+    if (entry.unitLabel && entry.qty > 0) { setPendingGrams(String(entry.qty)); setPendingUnit(entry.unitLabel); }
+    else { setPendingGrams(String(entry.grams)); setPendingUnit("g"); }
     setPendingTime(entry.time || nowTimeStr());
     setPendingMealType(entry.mealType || "Snack");
     setEditingFoodEntryId(entry.id);
+  };
+
+  // ── Quick add: recent foods, favourites, and copying a previous day ──
+  const todayKey = todayStr();
+  const recents = useMemo(() => buildRecents(logsByDate, todayKey), [logsByDate, todayKey]);
+  const sourceDate = shiftDate(selectedDate, -1);
+  const sourceEntries = logsByDate[sourceDate] || [];
+  const copyGroups = useMemo(
+    () => [...groupByMeal(sourceEntries)].map(([label, es]) => ({ label, count: es.length })),
+    [sourceEntries]
+  );
+  const [copyNotice, setCopyNotice] = useState("");
+  const favouriteKeys = useMemo(() => new Set(favourites.map((f) => f.key)), [favourites]);
+
+  const describeEntry = (e) => {
+    const m = entryMacros(refreshedEntry(e, profile));
+    if (e.type === "food") return { name: e.food.name, detail: `${formatAmount(e)} · ${round(m.calories)} kcal` };
+    if (e.type === "manual") return { name: e.name, detail: `${e.mealType ? e.mealType + " · " : ""}${round(m.calories)} kcal` };
+    return { name: e.name, detail: `${e.section} · ${e.servings || 1}× · ${round(m.calories)} kcal` };
+  };
+  const addFromTemplate = (entry) => {
+    const fresh = refreshedEntry(templateFromEntry(entry), profile);
+    updateDayLog(selectedDate, [...dayLog, { ...fresh, id: Date.now(), time: nowTimeStr() }]);
+  };
+  const copyFromPreviousDay = (label) => {
+    const src = label ? sourceEntries.filter((e) => mealLabel(e) === label) : sourceEntries;
+    const copies = cloneEntries(src.map((e) => refreshedEntry(e, profile)), Date.now());
+    if (!copies.length) return;
+    updateDayLog(selectedDate, [...dayLog, ...copies]);
+    setCopyNotice(`Copied ${copies.length} item${copies.length === 1 ? "" : "s"}${label ? ` from ${label}` : ""}.`);
+    setTimeout(() => setCopyNotice(""), 4000);
   };
 
   const addMealEntry = (entry) => updateDayLog(selectedDate, [...dayLog, entry]);
@@ -1946,7 +2038,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         const m = entryMacros(entry);
         const name = entry.type === "food" ? entry.food.name : entry.name;
         const qty =
-          entry.type === "food" ? `${entry.grams}g` :
+          entry.type === "food" ? formatAmount(entry) :
           entry.type === "manual" ? "manual entry" :
           `${entry.servings || 1}x serving`;
         const notYetQuantified = entry.type === "manual" && entry.quantified === false;
@@ -1961,6 +2053,15 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         ]);
       });
     });
+    // Weigh-ins go in the same file as a second section, so Export really is "everything".
+    let weights = [];
+    try { weights = JSON.parse(window.localStorage.getItem("pe_weight_log") || "[]"); } catch (e) { weights = []; }
+    if (Array.isArray(weights) && weights.length) {
+      rows.push([]);
+      rows.push(["Weight log"]);
+      rows.push(["Date", "Weight (kg)"]);
+      weights.forEach((w) => rows.push([w.date, w.kg]));
+    }
     const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -2172,6 +2273,19 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         />
       </div>
 
+      <QuickAddCard
+        recents={recents}
+        favourites={favourites}
+        describe={describeEntry}
+        onAdd={addFromTemplate}
+        onToggleFavourite={toggleFavourite}
+        isFavourite={(key) => favouriteKeys.has(key)}
+        copyGroups={copyGroups}
+        copySourceLabel={selectedDate === todayKey ? "yesterday" : "the day before"}
+        onCopy={copyFromPreviousDay}
+        copyNotice={copyNotice}
+      />
+
       <AddMealLog profile={profile} onAdd={addMealEntry} onViewRecipe={onViewRecipe} />
 
       <div className="pe-card p-4 mb-4">
@@ -2218,7 +2332,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                     key={i}
                     className="w-full text-left px-3 py-2 text-xs block"
                     style={{ borderBottom: i < packagedResults.length - 1 ? "1px solid #E4E1D6" : "none" }}
-                    onClick={() => { setScannedProduct(p); setScannedGrams(100); setPackagedResults([]); setPackagedSearchOpen(false); }}
+                    onClick={() => { setScannedProduct(p); { const d = defaultQuantity(p); setScannedGrams(d.qty); setScannedUnit(d.unit); } setPackagedResults([]); setPackagedSearchOpen(false); }}
                   >
                     <div className="font-medium">{p.name}{p.brand ? ` (${p.brand})` : ""}</div>
                     <div style={{ color: "#948A78" }}>{p.kcal} kcal · P{p.protein} C{p.carb} F{p.fat} per 100g</div>
@@ -2270,31 +2384,39 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
             <div className="text-xs mb-2" style={{ color: "#948A78" }}>
               Per 100g: {scannedProduct.kcal} kcal · P{scannedProduct.protein} C{scannedProduct.carb} F{scannedProduct.fat}
             </div>
-            <div className="flex items-center gap-2 mb-2">
-              <input
-                type="number"
-                className="pe-input flex-1 px-3 py-2 text-sm"
-                value={scannedGrams}
-                onChange={(e) => setScannedGrams(e.target.value)}
+            <div className="mb-2">
+              <FoodQuantity
+                food={scannedProduct}
+                qty={scannedGrams}
+                unit={scannedUnit}
+                onQty={setScannedGrams}
+                onUnit={(u) => {
+                  const servings = servingsFor(scannedProduct);
+                  const grams = gramsFrom(scannedGrams, scannedUnit, servings);
+                  const target = u === "g" ? null : servings.find((x) => x.label === u);
+                  setScannedUnit(u);
+                  if (grams > 0) setScannedGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
+                }}
               />
-              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
-              <input
-                type="time"
-                className="pe-input px-2 py-2 text-sm"
-                value={scannedTime}
-                onChange={(e) => setScannedTime(e.target.value)}
-              />
+              {scannedProduct.servingText && (
+                <div className="text-[11px] mt-1" style={{ color: "#948A78" }}>Pack serving: {scannedProduct.servingText}</div>
+              )}
+            </div>
+            <div className="flex gap-2 mb-2">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
+                <input type="time" className="pe-input w-full px-2 py-2 text-sm" value={scannedTime} onChange={(e) => setScannedTime(e.target.value)} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
+                <select className="pe-input w-full px-2 py-2 text-sm" value={scannedMealType} onChange={(e) => setScannedMealType(e.target.value)}>
+                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
             </div>
             <div className="flex items-center gap-2">
-              <select
-                className="pe-input flex-1 px-2 py-2 text-sm"
-                value={scannedMealType}
-                onChange={(e) => setScannedMealType(e.target.value)}
-              >
-                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
-                Add
+              <button className="pe-btn-primary flex-1 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
+                Add to log
               </button>
               <button className="text-xs font-medium" style={{ color: "#948A78" }} onClick={() => setScannedProduct(null)}>
                 Cancel
@@ -2318,7 +2440,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 key={f.name}
                 className="w-full text-left px-3 py-2 text-sm block"
                 style={{ background: "#FFFFFF", borderBottom: "1px solid #F0ECE0" }}
-                onClick={() => { setPendingFood(f); setQuery(f.name); }}
+                onClick={() => { setPendingFood(f); setQuery(f.name); const d = defaultQuantity(f); setPendingGrams(d.qty); setPendingUnit(d.unit); }}
               >
                 {f.name}
                 <span className="pe-mono text-[11px] ml-2" style={{ color: "#948A78" }}>
@@ -2334,38 +2456,52 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
         {pendingFood && (
           <div className="pe-fadein mb-2">
-            <div className="flex items-center gap-2 mb-2">
-              <input
-                type="number"
-                className="pe-input flex-1 px-3 py-2 text-sm"
-                value={pendingGrams}
-                onChange={(e) => setPendingGrams(e.target.value)}
-                placeholder="grams"
-              />
-              <span className="text-xs" style={{ color: "#948A78" }}>g</span>
-              <input
-                type="time"
-                className="pe-input px-2 py-2 text-sm"
-                value={pendingTime}
-                onChange={(e) => setPendingTime(e.target.value)}
+            <div className="mb-2">
+              <FoodQuantity
+                food={pendingFood}
+                qty={pendingGrams}
+                unit={pendingUnit}
+                onQty={setPendingGrams}
+                onUnit={(u) => {
+                  // switching unit keeps the same real amount where it can (e.g. 118g → 1 medium)
+                  const servings = servingsFor(pendingFood);
+                  const grams = gramsFrom(pendingGrams, pendingUnit, servings);
+                  const target = u === "g" ? null : servings.find((x) => x.label === u);
+                  setPendingUnit(u);
+                  if (grams > 0) setPendingGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
+                }}
               />
             </div>
+            <div className="flex gap-2 mb-2">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
+                <input
+                  type="time"
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={pendingTime}
+                  onChange={(e) => setPendingTime(e.target.value)}
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
+                <select
+                  className="pe-input w-full px-2 py-2 text-sm"
+                  value={pendingMealType}
+                  onChange={(e) => setPendingMealType(e.target.value)}
+                >
+                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+            </div>
             <div className="flex items-center gap-2">
-              <select
-                className="pe-input flex-1 px-2 py-2 text-sm"
-                value={pendingMealType}
-                onChange={(e) => setPendingMealType(e.target.value)}
-              >
-                {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <button className="pe-btn-primary px-4 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
-                {editingFoodEntryId ? "Save" : "Add"}
+              <button className="pe-btn-primary flex-1 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
+                {editingFoodEntryId ? "Save changes" : "Add to log"}
               </button>
               {editingFoodEntryId && (
                 <button
                   className="text-xs font-medium"
                   style={{ color: "#948A78" }}
-                  onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams(100); setEditingFoodEntryId(null); }}
+                  onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams("100"); setPendingUnit("g"); setEditingFoodEntryId(null); }}
                 >
                   Cancel
                 </button>
@@ -2520,7 +2656,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                       <div className="pe-mono text-xs" style={{ color: "#948A78" }}>
                         {entry.mealType && `${entry.mealType} · `}
                         {entry.time && `${entry.time} · `}
-                        {entry.type === "food" && `${entry.grams}g · `}
+                        {entry.type === "food" && `${formatAmount(entry)} · `}
                         {entry.type === "manual" && "manual entry · "}
                         {round(m.calories)} kcal · P{round(m.protein)} C{round(m.carbs)} F{round(m.fat)}
                         {entry.type === "manual" && (
@@ -2566,6 +2702,15 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                       </div>
                     )}
                   </div>
+                  <button
+                    className="text-lg px-1 shrink-0"
+                    style={{ color: favouriteKeys.has(entryKey(entry)) ? "#D9A21B" : "#B8B2A0" }}
+                    onClick={() => toggleFavourite(entry)}
+                    aria-label={favouriteKeys.has(entryKey(entry)) ? "Remove from favourites" : "Save as a favourite"}
+                    title={favouriteKeys.has(entryKey(entry)) ? "Remove from favourites" : "Save as a favourite"}
+                  >
+                    {favouriteKeys.has(entryKey(entry)) ? "★" : "☆"}
+                  </button>
                   <button
                     className="text-lg font-bold px-2 shrink-0"
                     style={{ color: "#948A78" }}
@@ -2665,9 +2810,15 @@ function RecipeCard({ item, isFixed, macros, veggie, cartQty, onAdd, onRemove, o
           {macros.usesFixedProtein && macros.proteinTargetEquivalent && (
             <div className="rounded-lg p-3 mb-3 text-[12px]" style={{ background: "#FFF7ED", border: "1px solid #F5DCC9", color: "#9C5527" }}>
               <strong>Protein note:</strong> this recipe uses a normal serving of {item.proteinFood.toLowerCase()} ({round(macros.proteinPortion)}g),
-              giving {round(macros.proteinG)}g protein. To get your full protein target for this meal from {item.proteinFood.toLowerCase()} alone,
-              you'd need roughly {round(macros.proteinTargetEquivalent)}g — a genuinely unrealistic single portion. Pair this with an extra
-              protein source (a shake, some Greek yoghurt, a couple of eggs) to close the gap, or treat this as a lighter meal within your day's total.
+              so the whole meal comes to {round(macros.proteinG)}g protein against your {round(macros.proteinTarget)}g target for this meal.
+              Reaching it from {item.proteinFood.toLowerCase()} alone would take roughly {round(macros.proteinTargetEquivalent)}g — a genuinely
+              unrealistic single portion.
+              {(() => {
+                const t = proteinTopUp(macros.proteinTarget - macros.proteinG);
+                return t ? (
+                  <> To close the {t.shortfall}g gap, add about <strong>{t.wheyG}g of whey</strong> (a scoop or so) or <strong>{t.yoghurtG}g of Greek yoghurt</strong> on the side — or treat this as a lighter-protein meal within your day's total.</>
+                ) : null;
+              })()}
             </div>
           )}
           {macros.usesFixedCarb && macros.carbTargetEquivalent && (
@@ -3330,6 +3481,7 @@ const PRIMARY_TABS = [
   { key: "gym", label: "Gym", icon: "🏋" },
 ];
 const MORE_TABS = [
+  { key: "weight", label: "Weight", icon: "⚖" },
   { key: "order", label: "Order", icon: "🧺" },
   { key: "shopping", label: "Shop", icon: "🛒" },
   { key: "setup", label: "Setup", icon: "⚙" },
@@ -3348,6 +3500,8 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
   const [dayNotes, setDayNotes] = useState({});
   const [waterByDate, setWaterByDate] = useState({});
   const [myWeekPlans, setMyWeekPlans] = useState({}); // { weekStart: { plan: {...} } }
+  const [favourites, setFavourites] = useState([]); // [{ key, entry }] — saved foods/meals for one-tap re-logging
+  const [weightLog, setWeightLog] = useState([]); // [{ date: "YYYY-MM-DD", kg }] sorted oldest → newest
   const [checkedItems, setCheckedItemsState] = useState({});
   const [jumpTarget, setJumpTarget] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
@@ -3400,6 +3554,8 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       const dn = await loadStored("pe_day_notes", {});
       const wt = await loadStored("pe_water_by_date", {});
       const mwp = await loadStored("pe_my_week_plans", {});
+      const fav = await loadStored("pe_favourites", []);
+      const wl = await loadStored("pe_weight_log", []);
       const ch = await loadStored("pe_checked_items", {});
       const oh = await loadStored("pe_order_history", []);
       const hi = await loadStored("pe_hidden_items", {});
@@ -3409,6 +3565,8 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
       setDayNotes(dn);
       setWaterByDate(wt);
       setMyWeekPlans(mwp);
+      setFavourites(Array.isArray(fav) ? fav : []);
+      setWeightLog(Array.isArray(wl) ? wl : []);
       setCheckedItemsState(ch);
       setOrderHistory(oh);
       setHiddenItemsState(hi);
@@ -3461,6 +3619,33 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
     setWaterByDate((prev) => {
       const next = { ...prev, [date]: Math.max(0, glasses) };
       saveStored("pe_water_by_date", next);
+      return next;
+    });
+  }, []);
+
+  const toggleFavourite = useCallback((entry) => {
+    const key = entryKey(entry);
+    setFavourites((prev) => {
+      const next = prev.some((f) => f.key === key)
+        ? prev.filter((f) => f.key !== key)
+        : [...prev, { key, entry: templateFromEntry(entry) }];
+      saveStored("pe_favourites", next);
+      return next;
+    });
+  }, []);
+
+  const addWeight = useCallback((date, kg) => {
+    setWeightLog((prev) => {
+      const next = upsertWeight(prev, date, kg);
+      saveStored("pe_weight_log", next);
+      return next;
+    });
+  }, []);
+
+  const deleteWeight = useCallback((date) => {
+    setWeightLog((prev) => {
+      const next = prev.filter((w) => w.date !== date);
+      saveStored("pe_weight_log", next);
       return next;
     });
   }, []);
@@ -3608,9 +3793,10 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
             onProfileRefresh={onProfileRefresh}
           />
         )}
-        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} quickAction={logQuickAction} onQuickActionHandled={() => setLogQuickAction(null)} />}
+        {tab === "log" && <DailyLogScreen profile={profile} logsByDate={logsByDate} updateDayLog={updateDayLog} clearDayLog={clearDayLog} onViewRecipe={viewRecipe} dayNotes={dayNotes} updateDayNotes={updateDayNotes} waterByDate={waterByDate} updateWater={updateWater} quickAction={logQuickAction} onQuickActionHandled={() => setLogQuickAction(null)} favourites={favourites} toggleFavourite={toggleFavourite} />}
         {tab === "gym" && <GymScreen profile={profile} onAddToTodayLog={addToTodayLog} onViewRecipe={viewRecipe} />}
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
+        {tab === "weight" && <WeightScreen weightLog={weightLog} onAdd={addWeight} onDelete={deleteWeight} profile={profile} onUseBodyweight={(kg) => setProfile({ ...profile, bodyweight: String(kg) })} />}
         {tab === "plan" && <MyWeekPlanScreen profile={profile} myWeekPlans={myWeekPlans} updateMyWeekPlan={updateMyWeekPlan} updateCart={updateCart} onViewRecipe={viewRecipe} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
         {tab === "shopping" && <ShoppingListScreen cart={cart} profile={profile} checkedItems={checkedItems} toggleChecked={toggleChecked} clearChecks={clearChecks} onArchive={archiveOrder} hiddenItems={hiddenItems} onClearTicked={clearTicked} />}

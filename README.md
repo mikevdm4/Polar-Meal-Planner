@@ -155,3 +155,25 @@ actually renders (this is how a Settings-page crash once shipped). Run this befo
 It mounts the real app in a simulated browser and opens every screen (Daily Log, Recipes, Plan, Gym, Order,
 Shop, Setup, Help & Guide, Cooking Guide, barcode scanner). It exits with an error and names the screen that
 crashed if anything is broken.
+
+## Account deletion (required before an App Store submission)
+
+The in-app **Delete my account** button (More → Setup, and on the coach dashboard) calls a small function in the
+database. Run `supabase/delete_account.sql` once in Supabase → SQL Editor → New query → Run. Until you do, the
+button shows a message saying deletion isn't switched on yet, and nothing is deleted.
+
+It only ever deletes the signed-in person's own account, refuses to delete a super-admin (so you can't lock
+yourself out), and leaves any athletes of a deleted coach in place, just unlinked.
+
+## What syncs to a person's account
+
+Everything the app saves on a device under the `pe_` prefix is uploaded automatically (food log, notes, water,
+weights, favourites, weekly plans, orders…). You don't need to register new keys — as long as a new feature saves
+under `pe_…` it syncs. `npm run tally` fails if something is saved under another name.
+
+## Running the checks
+
+    npm test        # runs both of the below
+    npm run tally   # data + maths: recipes add up, serving sizes valid, sync covers everything
+    npm run smoke   # opens every screen and uses the features like a person would
+    npm run edge    # opens Settings under 15 unusual profile shapes (empty, missing, half-filled…)

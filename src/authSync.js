@@ -1,35 +1,46 @@
 import { supabase } from "./supabaseClient.js";
 
-const ALL_KEYS = [
-  "pe_profile",
-  "pe_cart",
-  "pe_logs_by_date",
-  "pe_checked_items",
-  "pe_order_history",
-  "pe_hidden_items",
-  "pe_onboarded",
-];
+// Everything the app saves to this device lives under the "pe_" prefix, and everything under that prefix
+// syncs. This used to be a hand-written list of keys, which meant every new feature that saved something
+// new (day notes, water, the weekly planner…) silently never synced unless someone remembered to add it.
+// Prefix-based means a new feature can't forget.
+export const SYNC_PREFIX = "pe_";
+
+function localSyncKeys() {
+  const keys = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (k && k.startsWith(SYNC_PREFIX)) keys.push(k);
+  }
+  return keys;
+}
 
 function readAllLocal() {
   const bundle = {};
-  ALL_KEYS.forEach((k) => {
+  localSyncKeys().forEach((k) => {
     try {
-      const raw = window.localStorage.getItem(k);
-      bundle[k] = raw !== null ? JSON.parse(raw) : null;
+      bundle[k] = JSON.parse(window.localStorage.getItem(k));
     } catch {
-      bundle[k] = null;
+      // unreadable value — leave it out rather than upload garbage
     }
   });
   return bundle;
 }
 
 function writeAllLocal(bundle) {
-  ALL_KEYS.forEach((k) => {
-    if (bundle[k] !== undefined && bundle[k] !== null) {
+  Object.entries(bundle || {}).forEach(([k, v]) => {
+    if (k.startsWith(SYNC_PREFIX) && v !== undefined && v !== null) {
       try {
-        window.localStorage.setItem(k, JSON.stringify(bundle[k]));
+        window.localStorage.setItem(k, JSON.stringify(v));
       } catch {}
     }
+  });
+}
+
+// Wipe everything this app stored on the device (used when an account is deleted).
+export function clearLocalAppData() {
+  localSyncKeys().forEach((k) => {
+    try { window.localStorage.removeItem(k); } catch {}
   });
 }
 

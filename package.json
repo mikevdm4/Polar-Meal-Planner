@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "smoke": "vite build --config tests/vite.test.config.js && node tests/smoke.mjs"
+    "smoke": "vite build --config tests/vite.test.config.js && node tests/smoke.mjs",
+    "tally": "node tests/tally.mjs",
+    "test": "npm run tally && npm run smoke && node tests/scenarios.mjs",
+    "edge": "vite build --config tests/vite.test.config.js && node tests/scenarios.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

@@ -180,3 +180,6 @@ create policy "coach manages own athlete feedback" on coach_feedback
 
 create policy "athlete reads own feedback" on coach_feedback
   for select using (athlete_id = auth.uid());
+
+-- ── Account deletion (needed for App Store submission) ──
+-- See delete_account.sql — run that file too.

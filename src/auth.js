@@ -40,6 +40,22 @@ export async function signOut() {
   await supabase.auth.signOut();
 }
 
+// Permanently deletes the signed-in user's account and all their data, via the delete_my_account()
+// function in supabase/delete_account.sql (the browser can't delete an auth user directly with the public
+// key, so a small server-side function does it — and only ever for the caller's own account).
+export async function deleteMyAccount() {
+  const { error } = await supabase.rpc("delete_my_account");
+  if (error) {
+    const msg = String(error.message || "");
+    if (error.code === "PGRST202" || /could not find the function|does not exist/i.test(msg)) {
+      throw new Error("Account deletion hasn't been switched on for this app yet (the delete_account SQL still needs running in Supabase).");
+    }
+    if (/super-admin/i.test(msg)) throw new Error(msg);
+    throw new Error("Couldn't delete the account — check your connection and try again.");
+  }
+  try { await supabase.auth.signOut(); } catch {}
+}
+
 export async function getSession() {
   const { data } = await supabase.auth.getSession();
   return data.session;

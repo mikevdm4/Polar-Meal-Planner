@@ -4,7 +4,7 @@
 // calls to Supabase — those still need a real connection, and the app's
 // own localStorage-first design already handles that gracefully.
 
-const CACHE_NAME = "polar-endurance-shell-v1";
+const CACHE_NAME = "polar-endurance-shell-v2";
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
