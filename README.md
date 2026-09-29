@@ -177,3 +177,18 @@ under `pe_…` it syncs. `npm run tally` fails if something is saved under anoth
     npm run tally   # data + maths: recipes add up, serving sizes valid, sync covers everything
     npm run smoke   # opens every screen and uses the features like a person would
     npm run edge    # opens Settings under 15 unusual profile shapes (empty, missing, half-filled…)
+
+## Nutrition-label photo reading
+
+The barcode scanner's "not found" screen offers a photo-of-the-label fallback (`src/NutritionLabelScanner.jsx` +
+`src/labelParser.js`), using `tesseract.js` for on-device text reading — free, no API key, and nothing is sent
+anywhere. The engine, wasm core and English language data (~9MB total) are self-hosted in `public/tesseract/`
+rather than the library's CDN default, so this doesn't depend on a third-party CDN being reachable. They're
+lazy-loaded only when someone actually uses this feature, not part of the main app bundle.
+
+Because label photos are never perfectly read (letters like "g" get misread as digits, decimal points vanish),
+the parser tries several plausible readings of each number and picks the combination whose protein + carbs + fat
+best explains the label's stated calories — then always shows the result for the person to check against their
+own photo before it's used, with a warning on anything that looks unreliable. `npm run tally` includes real
+garbled OCR output (not idealized clean text) as test cases, and `npm run smoke` drives an actual photo through
+to a logged entry with the OCR call mocked (it needs a Web Worker, which the test's simulated browser can't run).

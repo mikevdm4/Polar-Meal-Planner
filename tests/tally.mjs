@@ -4,12 +4,12 @@
 import fs from "fs";
 
 const src = (f) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8").replace(/^export /gm, "");
-const code = src("data.js") + "\n" + src("calculations.js") + "\n" + src("servings.js") + "\n" + src("logHelpers.js") + "\n" + src("barcode.js") +
+const code = src("data.js") + "\n" + src("calculations.js") + "\n" + src("servings.js") + "\n" + src("logHelpers.js") + "\n" + src("barcode.js") + "\n" + src("labelParser.js") +
   "\nreturn { RECIPE_DATA, FOOD_LIST, computeTargets, mealTarget, scaledMacros, fixedMacros, SERVINGS, servingsFor, gramsFrom, formatAmount," +
-  " normalizeBarcode, isValidBarcode, explainCameraError, parseDate, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange };";
+  " normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, parseDate, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange };";
 const {
   RECIPE_DATA, FOOD_LIST, computeTargets, mealTarget, scaledMacros, fixedMacros, SERVINGS, servingsFor, gramsFrom, formatAmount,
-  normalizeBarcode, isValidBarcode, explainCameraError, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange,
+  normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange,
 } = new Function(code)();
 
 const DB = Object.fromEntries(FOOD_LIST.map((f) => [f.name, f]));
@@ -223,6 +223,50 @@ section("9. Barcode helpers");
   const okMsgs = cases.every(([input, re]) => re.test(explainCameraError(input)));
   console.log(`   camera failures explained specifically: ${okMsgs}`);
   if (!okMsgs) fail("explainCameraError doesn't map camera failures to the right explanation: " + cases.map(([i]) => explainCameraError(i)).join(" | "));
+}
+
+// 10. Nutrition-label photo reading: real OCR output from tests/fixtures label photos (see README), including
+// the exact garbled text the OCR engine produces on a small/blurry photo — not idealized clean input.
+section("10. Nutrition-label photo parsing");
+{
+  const cases = [
+    {
+      name: "UK label, decent phone photo (g misread as 9, decimals dropped)",
+      text: "Nutrition\nTypical values Per 100g Per 30g serving %RI*\nEnergy 1590kJ/378kcal 477kJ/113kcal 6%\nFat 5.19 1.59 2%\nof which saturates 1.0g 0.39 2%\nCarbohydrate 699 219g 8%\nof which sugars 139g 3.99 4%\nFibre 5.80 1.79\nProtein 8.39 2.59 5%\nSalt 0.019 0.00g 0%",
+      expect: { kcal: 378, protein: 8.3, carb: 69, fat: 5.1, basis: "per100" },
+    },
+    {
+      name: "US Nutrition Facts panel (per-serving only, with a serving size)",
+      text: "Nutrition Facts\n8 servings per container\nServing size 2/3 cup (55g)\nCalories 230\nTotal Fat 8g 10%\nSaturated Fat 1g 5%\nTotal Carbohydrate 37g 13%\nDietary Fiber 4g 14%\nTotal Sugars 12g\nProtein 3g",
+      expect: { kcal: 230, protein: 3, carb: 37, fat: 8, basis: "perServing", servingG: 55 },
+    },
+    {
+      name: "Badly garbled photo: Energy and Fat rows unreadable, Protein/Carb fine — must NOT guess the unreadable ones",
+      text: "Nutrition\nTypical values Per 100g Per 30g serving %RI*\nEw 1500kuSTekcal4T7kNIISkeR EE\n= sig = 5\nof which saturates 1.09 0.39 2%\nCarbohydrate 699g 21g 8%\nof which sugars 13g 3.99 4%\nFibre 5.89 1.79\nProtein 8.39 2.59 5%",
+      expect: { kcal: null, protein: 8.3, carb: 69, fat: null },
+    },
+  ];
+  let ok = 0;
+  for (const c of cases) {
+    const r = parseNutritionText(c.text, { confidence: 70 });
+    const pass = Object.entries(c.expect).every(([k, v]) => r[k] === v);
+    console.log(`   ${pass ? "ok  " : "FAIL"}  ${c.name}`);
+    if (pass) ok++;
+    else fail(`Label parse "${c.name}": got ${JSON.stringify({ kcal: r.kcal, protein: r.protein, carb: r.carb, fat: r.fat, basis: r.basis, servingG: r.servingG })}, expected ${JSON.stringify(c.expect)}`);
+  }
+  console.log(`   ${ok}/${cases.length} label-parsing cases correct`);
+
+  // Numbers that add up are accepted; numbers that clearly don't are flagged rather than silently trusted.
+  const goodSum = atwaterCheck({ kcal: 378, protein: 8.3, carb: 69, fat: 5.1 });
+  const badSum = atwaterCheck({ kcal: 230, protein: 3, carb: 37, fat: 40 }); // fat alone would be 360 kcal
+  console.log(`   consistent numbers pass the sense-check: ${goodSum.ok} | wildly inconsistent numbers are flagged: ${!badSum.ok}`);
+  if (!goodSum.ok) fail("atwaterCheck rejected numbers that genuinely add up");
+  if (badSum.ok) fail("atwaterCheck accepted numbers that clearly don't add up (protein+carb+fat far exceeds the stated calories)");
+
+  const converted = toPer100({ kcal: 230, protein: 3, carb: 37, fat: 8 }, "perServing", 55);
+  const okConvert = converted.kcal === 418 && converted.protein === 5.5;
+  console.log(`   per-serving values convert to per-100g correctly: ${okConvert}`);
+  if (!okConvert) fail(`toPer100 conversion wrong: ${JSON.stringify(converted)}`);
 }
 
 if (failures.length) {

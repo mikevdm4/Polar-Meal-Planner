@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: { "tesseract.js": new URL("./mocks/tesseract.mjs", import.meta.url).pathname },
+  },
   build: {
     outDir: "dist-test",
     emptyOutDir: true,

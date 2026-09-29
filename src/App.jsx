@@ -13,6 +13,7 @@ import { FoodQuantity, defaultQuantity } from "./QuantityInput.jsx";
 import { QuickAddCard } from "./QuickAdd.jsx";
 import { WeightScreen } from "./WeightScreen.jsx";
 import { BarcodeScannerModal } from "./BarcodeScanner.jsx";
+import { NutritionLabelScanner } from "./NutritionLabelScanner.jsx";
 import { normalizeBarcode } from "./barcode.js";
 import { DeleteAccountCard } from "./DeleteAccount.jsx";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
@@ -339,15 +340,20 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         is for typing a branded item's name instead (a protein bar, a cereal) when you don't have the packet to
         hand. Both pull from Open Food Facts, a free, community-maintained database — always worth a glance at
         the figures before adding, especially for less common products.</p>
-        <p><strong>If the camera won't read a barcode</strong>, the scanner screen has two backups under the camera:
-        <strong> take a photo of the barcode</strong> (your phone's own camera app focuses better than a live view, so it
-        often reads what the live view can't), or <strong>type the number printed under the bars</strong> — it checks the
-        last digit for you, so a mistyped number is caught straight away. Hold the barcode 15–25cm away in good light with
-        the bars filling most of the frame.</p>
-        <p><strong>If a scan says the product isn't found</strong>, the barcode itself was read correctly — that
-        product just isn't in the database yet. You can browse the same database (and add missing products to
-        it) at <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener noreferrer" className="underline font-semibold">world.openfoodfacts.org</a>,
-        or simply log it manually and carry on.</p>
+        <p>Logging a packaged food has a few steps, roughly in the order worth trying:</p>
+        <p><strong>1. Scan the barcode.</strong> If the camera won't read it, the scanner screen has two backups:
+        <strong> take a photo of the barcode</strong> (your phone's own camera app focuses better than a live view), or
+        <strong> type the number printed under the bars</strong> — it checks the last digit for you, so a mistyped number
+        is caught straight away. Hold the barcode 15–25cm away in good light with the bars filling most of the frame.</p>
+        <p><strong>2. If the barcode scans but the product isn't found</strong>, the code itself was read correctly — it
+        just isn't in the (free, community-run) database yet. You'll get a <strong>"📋 Photo the nutrition label
+        instead"</strong> button right there: take a photo of the actual Nutrition or Nutrition Facts panel on the pack,
+        and it reads the numbers off it. You always get to check every figure against your photo before it's added —
+        treat it as a head start on typing, not something to trust blindly, especially on a blurry or low-light photo.
+        You can also browse the barcode database directly (and add missing products to it) at{" "}
+        <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener noreferrer" className="underline font-semibold">world.openfoodfacts.org</a>.</p>
+        <p><strong>3. If neither works</strong>, "Pick from foods you eat often" jumps to Quick Add (your recent foods and
+        favourites), and "Log manually" lets you type it in directly.</p>
         <p>Logging manually doesn't require the numbers up front — leave calories blank if you just want to
         record <em>what</em> and <em>when</em> you ate something, and add the nutrition info later by tapping
         "Add nutrition info" on that entry.</p>
@@ -1823,6 +1829,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   const [editingFoodEntryId, setEditingFoodEntryId] = useState(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const manualSectionRef = useRef(null);
+  const foodSectionRef = useRef(null);
 
   useEffect(() => {
     if (!quickAction) return;
@@ -1836,6 +1843,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
     onQuickActionHandled?.();
   }, [quickAction]);
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [labelScannerOpen, setLabelScannerOpen] = useState(false);
   const [scannedProduct, setScannedProduct] = useState(null);
   const [scanStatus, setScanStatus] = useState(""); // "" | "loading" | "error"
   const [scanError, setScanError] = useState("");
@@ -1884,6 +1892,16 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       setScanErrorKind(e.kind || "other");
       setScanErrorBarcode(e.barcode || barcode);
     }
+  };
+
+  const handleLabelConfirmed = (values) => {
+    setLabelScannerOpen(false);
+    setScannedProduct({
+      name: "Photographed label", brand: "",
+      kcal: values.kcal, protein: values.protein, carb: values.carb, fat: values.fat,
+      servingG: values.servingG, servingText: values.servingG ? `${values.servingG}g` : "",
+    });
+    setScannedGrams("100"); setScannedUnit("g"); setScannedTime(nowTimeStr());
   };
 
   const addScannedProduct = () => {
@@ -2079,13 +2097,16 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
       {scannerOpen && (
         <BarcodeScannerModal onScan={handleBarcodeScanned} onClose={() => setScannerOpen(false)} />
       )}
+      {labelScannerOpen && (
+        <NutritionLabelScanner onConfirm={handleLabelConfirmed} onClose={() => setLabelScannerOpen(false)} />
+      )}
       <div className="flex items-center justify-between mb-1">
         <h2 className="pe-display text-xl font-semibold" style={{ color: "#14403E" }}>Daily log</h2>
         <div className="flex items-center gap-2">
           <div className="relative">
             <button
               className="w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold"
-              style={{ background: "#14403E", color: "#fff" }}
+              style={{ background: "#7A2E2E", color: "#fff" }}
               onClick={() => setQuickAddOpen((v) => !v)}
               title="Quick add"
             >
@@ -2099,6 +2120,13 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                   onClick={() => { setQuickAddOpen(false); setScannerOpen(true); }}
                 >
                   📷 Scan a barcode
+                </button>
+                <button
+                  className="w-full text-left px-4 py-3 text-sm font-medium block"
+                  style={{ borderBottom: "1px solid #E4E1D6" }}
+                  onClick={() => { setQuickAddOpen(false); foodSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                >
+                  🍽 Add a food
                 </button>
                 <button
                   className="w-full text-left px-4 py-3 text-sm font-medium block"
@@ -2290,7 +2318,7 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
 
       <div className="pe-card p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }}>Add a food</div>
+          <div className="pe-display text-sm font-semibold" style={{ color: "#14403E" }} ref={foodSectionRef}>Add a food</div>
           <div className="flex gap-2">
             <button
               className="pe-btn-secondary text-xs font-semibold px-3 py-1.5 rounded-full"
@@ -2361,12 +2389,26 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
                 , or log it manually below.
               </p>
             )}
+            {(scanErrorKind === "notfound" || scanErrorKind === "nodata") && (
+              <button
+                className="pe-btn-primary w-full py-2 rounded-full text-xs font-semibold mb-2"
+                onClick={() => { setScanStatus(""); setLabelScannerOpen(true); }}
+              >
+                📋 Photo the nutrition label instead
+              </button>
+            )}
             <div className="flex flex-wrap gap-x-3 gap-y-1">
               <button
                 className="text-xs font-semibold underline"
                 onClick={() => { setScanStatus(""); setScannerOpen(true); }}
               >
                 Try scanning again
+              </button>
+              <button
+                className="text-xs font-semibold underline"
+                onClick={() => { setScanStatus(""); foodSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+              >
+                Pick from foods you eat often
               </button>
               <button
                 className="text-xs font-semibold underline"

@@ -112,6 +112,25 @@ window.localStorage.setItem("pe_logs_by_date", JSON.stringify(SEED_LOGS));
 URL.createObjectURL = (blob) => { globalThis.__lastBlob = blob; return "blob:test"; };
 URL.revokeObjectURL = () => {};
 
+
+class FakeImage extends window.EventTarget {
+  constructor() { super(); this.naturalWidth = 800; this.naturalHeight = 1000; }
+  set src(v) { this._src = v; setTimeout(() => { if (this.onload) this.onload(); }, 10); }
+  get src() { return this._src; }
+}
+window.Image = FakeImage;
+globalThis.Image = FakeImage;
+globalThis.HTMLCanvasElement = window.HTMLCanvasElement;
+// jsdom has no <canvas> support at all (getContext returns null) — stub just enough for preprocess() to run.
+// The OCR result itself is already mocked above, so the actual pixel values drawn here don't matter.
+window.HTMLCanvasElement.prototype.getContext = function () {
+  const w = this.width, h = this.height;
+  return {
+    drawImage: () => {},
+    getImageData: () => ({ data: new Uint8ClampedArray(w * h * 4).fill(200), width: w, height: h }),
+    putImageData: () => {},
+  };
+};
 const realError = console.error;
 console.error = () => {}; // React logs expected noise for caught errors; we check the boundary instead
 window.eval(fs.readFileSync("dist-test/test-bundle.js", "utf8"));
@@ -126,6 +145,15 @@ const setValue = (el, value) => {
   Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
   el.dispatchEvent(new window.Event(el.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
 };
+
+function setFile(input, name = "label.jpg") {
+  // jsdom doesn't implement DataTransfer/FileList construction, so fake a minimal array-like FileList.
+  const file = new window.File(["fake-image-bytes"], name, { type: "image/jpeg" });
+  const fileList = { 0: file, length: 1, item: (i) => (i === 0 ? file : null), [Symbol.iterator]: function* () { yield file; } };
+  Object.defineProperty(input, "files", { value: fileList, configurable: true });
+  input.dispatchEvent(new window.Event("change", { bubbles: true }));
+}
+
 const byPlaceholder = (sub) => [...document.querySelectorAll("input")].find((i) => (i.placeholder || "").includes(sub));
 const stored = (k) => { try { return JSON.parse(window.localStorage.getItem(k)); } catch { return null; } };
 
@@ -315,6 +343,43 @@ if (scenario.suite === "features") {
       if (!body().includes("Days within 10% of target")) return `${m} view didn't render its summary`;
     }
     return true;
+  });
+
+  // ── nutrition-label photo scanning ──
+  await check("Label scanner: opens from the barcode 'not found' screen and reads a photo", async () => {
+    await openScanner();
+    await typeNumber("5000159407236"); // seeded as "not found" earlier in this file
+    await sleep(900);
+    if (!click((b) => b.textContent.includes("Photo the nutrition label instead"))) return "no hand-off button from a failed barcode scan";
+    await sleep(300);
+    const fileInput = document.querySelector('[data-testid="label-photo-input"]');
+    if (!fileInput) return "no photo input on the label scanner";
+    setFile(fileInput);
+    await sleep(600);
+    // The mock resolves almost instantly (unlike real OCR), so check it got past reading rather than catching
+    // that transient state — either outcome proves the read-a-photo pipeline actually ran.
+    return (body().includes("Calories (per 100g)") || body().includes("Couldn't make out")) || "stuck, or crashed, reading the photo";
+  });
+  await check("Label scanner: shows the parsed values per 100g for checking, pre-filled from the photo", async () => {
+    await sleep(600);
+    const kcalBox = [...document.querySelectorAll("input")].find((i) => i.previousElementSibling?.textContent?.includes("Calories"));
+    if (!kcalBox) return `no calories field — status text on screen: "${body().slice(0, 400)}"`;
+    return (kcalBox.value === "378" && body().includes("Check each one against your photo")) || `kcal field was "${kcalBox?.value}"`;
+  });
+  await check("Label scanner: the person can correct a misread value before confirming", async () => {
+    const proteinBox = [...document.querySelectorAll("input")].find((i) => i.previousElementSibling?.textContent?.includes("Protein"));
+    setValue(proteinBox, "8.4");
+    return proteinBox.value === "8.4" || "edited value didn't stick";
+  });
+  await check("Label scanner: confirming logs it through the normal food-entry flow (grams, time, meal)", async () => {
+    if (!click((b) => b.textContent.trim() === "Use these values")) return "no confirm button";
+    await sleep(300);
+    if (!body().includes("Photographed label")) return "didn't hand off to the normal scanned-product confirmation card";
+    click((b) => b.textContent.trim() === "Add to log"); await sleep(300);
+    const entries = stored("pe_logs_by_date")?.[daysAgo(0)] || [];
+    const last = entries[entries.length - 1];
+    return (last && last.food.name === "Photographed label" && last.food.protein === 8.4 && last.food.kcal === 378)
+      || `saved entry: ${JSON.stringify(last)?.slice(0, 160)}`;
   });
 
   // ── weight ──
