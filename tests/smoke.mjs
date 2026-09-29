@@ -263,6 +263,15 @@ if (scenario.suite === "features") {
     return body().includes("= 118g") || "preview didn't show 118g";
   });
 
+  await check("Finding a food opens a real popup, not an inline form", async () => {
+    const overlay = document.querySelector('[data-testid="food-confirm-modal"]');
+    if (!overlay) return "no popup backdrop found after picking a food";
+    return overlay.textContent.includes("Banana") || `popup didn't contain "Banana"`;
+  });
+  await check("The popup is portalled to <body>, so it can't get trapped inside an animating ancestor card", () => {
+    const overlay = document.querySelector('[data-testid="food-confirm-modal"]');
+    return overlay?.parentElement === document.body || `popup's parent was ${overlay?.parentElement?.tagName}, expected BODY`;
+  });
   await check("Changing the quantity updates grams and calories live", async () => {
     const qty = [...document.querySelectorAll("input")].find((i) => i.type === "number" && i.placeholder === "amount");
     setValue(qty, "2"); await sleep(250);
@@ -345,6 +354,44 @@ if (scenario.suite === "features") {
     return true;
   });
 
+  await check("Scanner: 'More options' offers the label photo, food search, and manual entry — even before any error", async () => {
+    await openScanner();
+    if (body().includes("More options")) {
+      // still scanning, no error — this is exactly the case the request was about
+    } else {
+      return "no 'More options' toggle while just scanning";
+    }
+    if (!click((b) => b.getAttribute("data-testid") === "more-options-toggle")) return "couldn't click the toggle";
+    await sleep(200);
+    const ok = body().includes("Photograph the nutrition label instead") && body().includes("Type in the meal name instead") && body().includes("Full manual entry");
+    return ok || "one or more of the three options is missing";
+  });
+  await check("Scanner: 'Photograph the nutrition label instead' closes the scanner and opens the label photo screen", async () => {
+    if (!click((b) => b.textContent.includes("Photograph the nutrition label instead"))) return "button not found";
+    await sleep(300);
+    return (document.querySelector('[data-testid="label-photo-input"]') && !document.querySelector('[data-testid="camera-view"]'))
+      || "didn't hand off to the label scanner (or the barcode scanner is still open)";
+  });
+  await check("Scanner: 'Type in the meal name instead' closes the scanner and lands on food search", async () => {
+    click((b) => b.textContent.trim() === "×" && b.className.includes("text-2xl")); await sleep(200); // close label scanner
+    await openScanner();
+    click((b) => b.getAttribute("data-testid") === "more-options-toggle"); await sleep(200);
+    if (!click((b) => b.textContent.includes("Type in the meal name instead"))) return "button not found";
+    await sleep(300);
+    return (!document.querySelector('[data-testid="camera-view"]') && !!byPlaceholder("Search foods")) || "didn't land back on the food search box";
+  });
+  await check("Scanner: 'Full manual entry' closes the scanner and opens the manual-entry form", async () => {
+    await openScanner();
+    click((b) => b.getAttribute("data-testid") === "more-options-toggle"); await sleep(200);
+    if (!click((b) => b.textContent.includes("Full manual entry"))) return "button not found";
+    await sleep(300);
+    return (!document.querySelector('[data-testid="camera-view"]') && body().includes("Time eaten")) || "manual entry form didn't open";
+  });
+  // Reset back to a clean Daily Log before the next block, which assumes nothing is left open.
+  if (document.querySelector('[data-testid="camera-view"]')) click((b) => b.textContent.trim() === "×" && b.className.includes("text-2xl"));
+  click((b) => b.textContent.includes("Log manually") && b.className.includes("w-full")); // collapses it back if still open
+  await sleep(200);
+
   // ── nutrition-label photo scanning ──
   await check("Label scanner: opens from the barcode 'not found' screen and reads a photo", async () => {
     await openScanner();
@@ -377,8 +424,8 @@ if (scenario.suite === "features") {
     if (!body().includes("Photographed label")) return "didn't hand off to the normal scanned-product confirmation card";
     click((b) => b.textContent.trim() === "Add to log"); await sleep(300);
     const entries = stored("pe_logs_by_date")?.[daysAgo(0)] || [];
-    const last = entries[entries.length - 1];
-    return (last && last.food.name === "Photographed label" && last.food.protein === 8.4 && last.food.kcal === 378)
+    const last = entries.find((e) => e.food?.name === "Photographed label");
+    return (last && last.food.protein === 8.4 && last.food.kcal === 378)
       || `saved entry: ${JSON.stringify(last)?.slice(0, 160)}`;
   });
 

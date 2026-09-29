@@ -34,6 +34,7 @@
   .pe-fadein { animation: peFadeIn 0.2s ease; }
   @keyframes peFadeIn { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: translateY(0);} }
   .pe-pulse { animation: pePulse 1.2s ease-in-out infinite; }
+  @keyframes peFocusRing { 0% { transform: scale(1.4); opacity: 0; } 30% { opacity: 1; } 100% { transform: scale(1); opacity: 0.9; } }
   @keyframes pePulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
   .pe-scroll::-webkit-scrollbar { height: 6px; width: 6px; }
   .pe-scroll::-webkit-scrollbar-thumb { background: #CFC7B4; border-radius: 3px; }

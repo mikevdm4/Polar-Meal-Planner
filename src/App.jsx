@@ -10,6 +10,7 @@ import { ErrorNotice, ReloadButton, hardReload, APP_VERSION } from "./ErrorNotic
 import { servingsFor, gramsFrom, formatAmount } from "./servings.js";
 import { buildRecents, templateFromEntry, cloneEntries, groupByMeal, mealLabel, shiftDate, entryKey, upsertWeight } from "./logHelpers.js";
 import { FoodQuantity, defaultQuantity } from "./QuantityInput.jsx";
+import { FoodConfirmModal } from "./FoodConfirmModal.jsx";
 import { QuickAddCard } from "./QuickAdd.jsx";
 import { WeightScreen } from "./WeightScreen.jsx";
 import { BarcodeScannerModal } from "./BarcodeScanner.jsx";
@@ -345,6 +346,9 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         <strong> take a photo of the barcode</strong> (your phone's own camera app focuses better than a live view), or
         <strong> type the number printed under the bars</strong> — it checks the last digit for you, so a mistyped number
         is caught straight away. Hold the barcode 15–25cm away in good light with the bars filling most of the frame.</p>
+        <p>If it's just taking a while, or you want to skip the barcode entirely, tap <strong>"More options"</strong> below
+        the camera at any time — no need to wait for an error first — for a straight route to photographing the
+        nutrition label, typing in the meal's name, or full manual entry.</p>
         <p><strong>2. If the barcode scans but the product isn't found</strong>, the code itself was read correctly — it
         just isn't in the (free, community-run) database yet. You'll get a <strong>"📋 Photo the nutrition label
         instead"</strong> button right there: take a photo of the actual Nutrition or Nutrition Facts panel on the pack,
@@ -2095,7 +2099,13 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
   return (
     <div className="pe-fadein px-4 pb-28 max-w-lg mx-auto pt-4">
       {scannerOpen && (
-        <BarcodeScannerModal onScan={handleBarcodeScanned} onClose={() => setScannerOpen(false)} />
+        <BarcodeScannerModal
+          onScan={handleBarcodeScanned}
+          onClose={() => setScannerOpen(false)}
+          onPhotographLabel={() => { setScannerOpen(false); setLabelScannerOpen(true); }}
+          onTypeMealName={() => { setScannerOpen(false); foodSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+          onManualEntry={() => { setScannerOpen(false); setManualOpen(true); manualSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+        />
       )}
       {labelScannerOpen && (
         <NutritionLabelScanner onConfirm={handleLabelConfirmed} onClose={() => setLabelScannerOpen(false)} />
@@ -2421,53 +2431,38 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
           </div>
         )}
         {scannedProduct && (
-          <div className="pe-fadein rounded-lg p-3 mb-3" style={{ background: "#F5F4EE", border: "1px solid #E4E1D6" }}>
-            <div className="text-sm font-semibold mb-1" style={{ color: "#14403E" }}>{scannedProduct.name}</div>
-            <div className="text-xs mb-2" style={{ color: "#948A78" }}>
-              Per 100g: {scannedProduct.kcal} kcal · P{scannedProduct.protein} C{scannedProduct.carb} F{scannedProduct.fat}
-            </div>
-            <div className="mb-2">
-              <FoodQuantity
-                food={scannedProduct}
-                qty={scannedGrams}
-                unit={scannedUnit}
-                onQty={setScannedGrams}
-                onUnit={(u) => {
-                  const servings = servingsFor(scannedProduct);
-                  const grams = gramsFrom(scannedGrams, scannedUnit, servings);
-                  const target = u === "g" ? null : servings.find((x) => x.label === u);
-                  setScannedUnit(u);
-                  if (grams > 0) setScannedGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
-                }}
-              />
-              {scannedProduct.servingText && (
-                <div className="text-[11px] mt-1" style={{ color: "#948A78" }}>Pack serving: {scannedProduct.servingText}</div>
-              )}
-            </div>
-            <div className="flex gap-2 mb-2">
-              <div className="flex-1 min-w-0">
-                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
-                <input type="time" className="pe-input w-full px-2 py-2 text-sm" value={scannedTime} onChange={(e) => setScannedTime(e.target.value)} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
-                <select className="pe-input w-full px-2 py-2 text-sm" value={scannedMealType} onChange={(e) => setScannedMealType(e.target.value)}>
-                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button className="pe-btn-primary flex-1 py-2 rounded-full text-xs font-semibold" onClick={addScannedProduct}>
-                Add to log
-              </button>
-              <button className="text-xs font-medium" style={{ color: "#948A78" }} onClick={() => setScannedProduct(null)}>
-                Cancel
-              </button>
-            </div>
-            <p className="text-[10px] mt-2" style={{ color: "#948A78" }}>
-              From Open Food Facts, a free community-maintained database — figures can occasionally be off or missing for less common products.
-            </p>
-          </div>
+          <FoodConfirmModal
+            title={scannedProduct.name}
+            subtitle={`Per 100g: ${scannedProduct.kcal} kcal · P${scannedProduct.protein} C${scannedProduct.carb} F${scannedProduct.fat}`}
+            food={scannedProduct}
+            qty={scannedGrams}
+            unit={scannedUnit}
+            onQty={setScannedGrams}
+            onUnit={(u) => {
+              const servings = servingsFor(scannedProduct);
+              const grams = gramsFrom(scannedGrams, scannedUnit, servings);
+              const target = u === "g" ? null : servings.find((x) => x.label === u);
+              setScannedUnit(u);
+              if (grams > 0) setScannedGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
+            }}
+            time={scannedTime}
+            onTime={setScannedTime}
+            mealType={scannedMealType}
+            onMealType={setScannedMealType}
+            mealOptions={MEAL_TYPE_OPTIONS}
+            onConfirm={addScannedProduct}
+            onCancel={() => setScannedProduct(null)}
+            note={
+              <>
+                {scannedProduct.servingText && (
+                  <p className="text-[11px] mt-2 text-center" style={{ color: "#948A78" }}>Pack serving: {scannedProduct.servingText}</p>
+                )}
+                <p className="text-[10px] mt-2 text-center" style={{ color: "#948A78" }}>
+                  From Open Food Facts, a free community-maintained database — figures can occasionally be off or missing for less common products.
+                </p>
+              </>
+            }
+          />
         )}
         <input
           className="pe-input w-full px-3 py-2.5 mb-2 text-sm"
@@ -2497,59 +2492,30 @@ function DailyLogScreen({ profile, logsByDate, updateDayLog, clearDayLog, onView
         )}
 
         {pendingFood && (
-          <div className="pe-fadein mb-2">
-            <div className="mb-2">
-              <FoodQuantity
-                food={pendingFood}
-                qty={pendingGrams}
-                unit={pendingUnit}
-                onQty={setPendingGrams}
-                onUnit={(u) => {
-                  // switching unit keeps the same real amount where it can (e.g. 118g → 1 medium)
-                  const servings = servingsFor(pendingFood);
-                  const grams = gramsFrom(pendingGrams, pendingUnit, servings);
-                  const target = u === "g" ? null : servings.find((x) => x.label === u);
-                  setPendingUnit(u);
-                  if (grams > 0) setPendingGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
-                }}
-              />
-            </div>
-            <div className="flex gap-2 mb-2">
-              <div className="flex-1 min-w-0">
-                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Time eaten</label>
-                <input
-                  type="time"
-                  className="pe-input w-full px-2 py-2 text-sm"
-                  value={pendingTime}
-                  onChange={(e) => setPendingTime(e.target.value)}
-                />
-              </div>
-              <div className="flex-1 min-w-0">
-                <label className="block text-[10px] font-medium mb-1" style={{ color: "#948A78" }}>Meal</label>
-                <select
-                  className="pe-input w-full px-2 py-2 text-sm"
-                  value={pendingMealType}
-                  onChange={(e) => setPendingMealType(e.target.value)}
-                >
-                  {MEAL_TYPE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button className="pe-btn-primary flex-1 py-2 rounded-full text-xs font-semibold" onClick={addFood}>
-                {editingFoodEntryId ? "Save changes" : "Add to log"}
-              </button>
-              {editingFoodEntryId && (
-                <button
-                  className="text-xs font-medium"
-                  style={{ color: "#948A78" }}
-                  onClick={() => { setPendingFood(null); setQuery(""); setPendingGrams("100"); setPendingUnit("g"); setEditingFoodEntryId(null); }}
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
+          <FoodConfirmModal
+            title={pendingFood.name}
+            subtitle={`Per 100g: ${pendingFood.kcal} kcal · P${pendingFood.protein} C${pendingFood.carb} F${pendingFood.fat}`}
+            food={pendingFood}
+            qty={pendingGrams}
+            unit={pendingUnit}
+            onQty={setPendingGrams}
+            onUnit={(u) => {
+              // switching unit keeps the same real amount where it can (e.g. 118g → 1 medium)
+              const servings = servingsFor(pendingFood);
+              const grams = gramsFrom(pendingGrams, pendingUnit, servings);
+              const target = u === "g" ? null : servings.find((x) => x.label === u);
+              setPendingUnit(u);
+              if (grams > 0) setPendingGrams(u === "g" ? String(Math.round(grams * 10) / 10) : String(Math.round((grams / target.grams) * 100) / 100));
+            }}
+            time={pendingTime}
+            onTime={setPendingTime}
+            mealType={pendingMealType}
+            onMealType={setPendingMealType}
+            mealOptions={MEAL_TYPE_OPTIONS}
+            confirmLabel={editingFoodEntryId ? "Save changes" : "Add to log"}
+            onConfirm={addFood}
+            onCancel={() => { setPendingFood(null); setQuery(""); setPendingGrams("100"); setPendingUnit("g"); setEditingFoodEntryId(null); }}
+          />
         )}
       </div>
 

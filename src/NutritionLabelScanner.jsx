@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import { parseNutritionText, toPer100, atwaterCheck } from "./labelParser.js";
 import { hardReload } from "./ErrorNotice.jsx";
+import { Portal } from "./Portal.jsx";
 
 // Loaded once, on first use — Tesseract's engine and language data are ~2MB+, no reason to ship it in the
 // main bundle for the far more common case of the camera or database lookup working fine.
@@ -102,6 +103,7 @@ export function NutritionLabelScanner({ onConfirm, onClose }) {
   };
 
   return (
+    <Portal>
     <div className="fixed inset-0 z-50 flex flex-col overflow-y-auto" style={{ background: "#14403E" }}>
       <div className="flex items-center justify-between p-4">
         <span className="text-sm font-semibold text-white">Photo the nutrition label</span>
@@ -211,5 +213,6 @@ export function NutritionLabelScanner({ onConfirm, onClose }) {
         Trouble with this too? <button type="button" className="underline" onClick={hardReload}>Reload the app page</button>.
       </p>
     </div>
+    </Portal>
   );
 }

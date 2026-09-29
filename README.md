@@ -192,3 +192,17 @@ best explains the label's stated calories — then always shows the result for t
 own photo before it's used, with a warning on anything that looks unreliable. `npm run tally` includes real
 garbled OCR output (not idealized clean text) as test cases, and `npm run smoke` drives an actual photo through
 to a logged entry with the OCR call mocked (it needs a Web Worker, which the test's simulated browser can't run).
+
+
+## Barcode-scanner camera settings
+
+The live scanner requests 1280×720, not full HD. For *software* barcode decoding (used on any browser without
+the native `BarcodeDetector` API — that's all of iOS Safari, and some Android browsers) every extra megapixel is
+work the decoder repeats up to 10 times a second, so asking for 1080p makes scanning visibly slower without
+actually helping — a barcode filling most of the frame has plenty of detail at 720p. If it's still slow on a
+particular device, check the small grey text under the camera view (e.g. "Camera 1280×720 · software decoder") —
+that tells you which path it's using.
+
+Tap-to-focus is offered only when the camera reports it actually supports a focus point
+(`MediaStreamTrack.getCapabilities().pointsOfInterest`) — mainly Chrome/Android; Safari doesn't implement this,
+so the hint is simply not shown there rather than offering something that wouldn't do anything.
