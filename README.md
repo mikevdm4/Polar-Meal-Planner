@@ -206,3 +206,25 @@ that tells you which path it's using.
 Tap-to-focus is offered only when the camera reports it actually supports a focus point
 (`MediaStreamTrack.getCapabilities().pointsOfInterest`) — mainly Chrome/Android; Safari doesn't implement this,
 so the hint is simply not shown there rather than offering something that wouldn't do anything.
+
+## Weekly Prep (Gousto/HelloFresh-style box builder)
+
+`src/WeeklyPrepScreen.jsx` + `src/weeklyPrep.js`. Pick a count of lunches/dinners, then either hand-pick or
+auto-generate ("Surprise me") a box of recipes. The generator in `weeklyPrep.js` deliberately biases picks
+toward recipes that share a protein or carb with something already chosen — real-data testing in
+`tests/tally.mjs` confirms a typical 7-meal box needs only ~8 unique core ingredients rather than the ~14 it
+would if every recipe pulled in something unrelated, which is the actual mechanism behind "doable as one
+shopping trip," not just marketing copy.
+
+**Direct supermarket checkout is not currently possible.** I checked this before building anything around it:
+none of the major UK supermarkets offer a public, self-serve API for third-party order placement today. The
+closest real precedent (Whisk's shoppable-recipe integration with Sainsbury's) was a formal business
+partnership, not something available to an independent app. Old developer APIs (e.g. Tesco's ~2009 program)
+don't appear to be live standard offerings, and third-party scraper services aren't something to build on
+(fragile, and against most retailers' terms). This feature therefore ends at a clean, combined shopping list
+(via the existing Order/Shop screens) rather than a fake "send to Sainsbury's" button — the right next step if
+this is wanted is a direct partnership conversation with a retailer, not more engineering.
+
+`weeklyPrep.js` is pure logic (seedable RNG via `makeRng`, so results are reproducible) and is unit-tested
+directly in `tests/tally.mjs` §11. `tests/smoke.mjs` drives the real screen: stepper counts, Surprise Me,
+per-recipe shuffle, the veggie-only filter, and adding a full box to the cart.

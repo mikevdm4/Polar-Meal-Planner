@@ -10,6 +10,12 @@ import fs from "fs";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 
+// The real recipe database, loaded directly (not through the app) — used to independently verify claims
+// the UI makes about what it picked (e.g. "this is veggie"), rather than trusting the app's own rendering.
+const RECIPE_DATA_REF = new Function(
+  fs.readFileSync(new URL("../src/data.js", import.meta.url), "utf8").replace("export const RECIPE_DATA", "const RECIPE_DATA").replace("export const FOOD_LIST", "const FOOD_LIST") + "; return RECIPE_DATA;"
+)();
+
 const pad = (n) => String(n).padStart(2, "0");
 const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return fmt(d); };
@@ -202,7 +208,8 @@ if (scenario.component === "coach-summary") {
 // ── every screen opens ──
 await visit("Daily Log", () => click(nav("Daily Log")), "Daily log");
 await visit("Recipes", () => click(nav("Recipes")));
-await visit("Plan", () => click(nav("Plan")), "Plan your week");
+await visit("Plan (via More)", () => openMore() && click(moreItem("Plan")), "Plan your week");
+await visit("Weekly Prep", () => click(nav("Prep")), "Weekly Prep");
 await visit("Gym", () => click(nav("Gym")));
 await visit("Weight (via More)", () => openMore() && click(moreItem("Weight")), "Log a weigh-in");
 await visit("Order (via More)", () => openMore() && click(moreItem("Order")));
@@ -218,6 +225,66 @@ await sleep(200);
 
 // ── features, used the way a person would ──
 if (scenario.suite === "features") {
+  // ── Weekly Prep: counts, surprise-me generation, shuffle, and adding a whole box to the order ──
+  click(nav("Prep")); await sleep(300);
+  await check("Weekly Prep: stepper counts meals and both build buttons reflect the total", async () => {
+    document.querySelector('[data-testid="prep-plus-Dinner"]')?.click(); // Dinner 4→5
+    await sleep(50);
+    document.querySelector('[data-testid="prep-plus-Lunch"]')?.click(); // Lunch 3→4
+    await sleep(50);
+    const dinnerCount = document.querySelector('[data-testid="prep-count-Dinner"]')?.textContent;
+    const lunchCount = document.querySelector('[data-testid="prep-count-Lunch"]')?.textContent;
+    if (dinnerCount !== "5" || lunchCount !== "4") return `counts were Dinner=${dinnerCount}, Lunch=${lunchCount}, expected 5 and 4`;
+    return body().includes("Surprise me — build 9 meals now") || `button text was wrong: ${body().slice(0, 300)}`;
+  });
+  let firstBoxDinner = "";
+  await check("Weekly Prep: 'Surprise me' builds a box with no duplicate recipes, skipping recovery-day meals", async () => {
+    if (!click((b) => b.textContent.includes("Surprise me"))) return "no surprise-me button";
+    await sleep(100); // let React flush the state update into the DOM before reading it back
+    const names = [...document.querySelectorAll(".pe-card")].flatMap((c) =>
+      [...c.querySelectorAll("button")].map((b) => b.querySelector(".truncate")?.textContent).filter(Boolean)
+    );
+    if (names.length !== 9) return `expected 9 recipes in the box, got ${names.length}: ${names.join(", ")}`;
+    firstBoxDinner = names[0];
+    return new Set(names).size === names.length || `duplicate recipe in the box: ${names.join(", ")}`;
+  });
+  await check("Weekly Prep: shows the one-shopping-trip ingredient count", () => body().includes("different core ingredients") || "no ingredient-count summary shown");
+  await check("Weekly Prep: shuffling one recipe changes only that one", async () => {
+    const shuffleBtns = [...document.querySelectorAll('button[aria-label="Shuffle this recipe"]')];
+    if (!shuffleBtns.length) return "no shuffle buttons found";
+    shuffleBtns[0].click();
+    await sleep(100);
+    const namesAfter = [...document.querySelectorAll(".pe-card")].flatMap((c) =>
+      [...c.querySelectorAll("button")].map((b) => b.querySelector(".truncate")?.textContent).filter(Boolean)
+    );
+    return (namesAfter.length === 9 && new Set(namesAfter).size === 9) || "shuffle broke the box (wrong count or a duplicate appeared)";
+  });
+  await check("Weekly Prep: adding the box puts every recipe in the cart", async () => {
+    if (!click((b) => b.textContent.includes("Add this whole week to my order"))) return "no add-to-order button";
+    await sleep(200);
+    const cart = stored("pe_cart") || {};
+    const cartCount = Object.values(cart).reduce((n, v) => n + (v.qty || 0), 0);
+    return (cartCount === 9 && body().includes("Added to your order")) || `cart had ${cartCount} items, expected 9`;
+  });
+  await check("Weekly Prep: 'Veggie recipes only' actually restricts the box to veggie recipes", async () => {
+    click((b) => b.textContent.trim() === "Start over"); await sleep(200);
+    // a checkbox is an <input>, not a <button> — the click() helper only searches buttons, so find it directly
+    const checkbox = [...document.querySelectorAll('input[type="checkbox"]')].find((i) => i.closest("label")?.textContent.includes("Veggie"));
+    if (!checkbox) return "no 'Veggie recipes only' checkbox found";
+    checkbox.click();
+    await sleep(150); // let the checked state settle before the next click reads it
+    click((b) => b.textContent.includes("Surprise me")); await sleep(200);
+    const names = [...document.querySelectorAll(".pe-card")].flatMap((c) =>
+      [...c.querySelectorAll("button")].map((b) => b.querySelector(".truncate")?.textContent).filter(Boolean)
+    );
+    const allVeggie = names.every((n) => {
+      const inLunch = RECIPE_DATA_REF.sections.Lunch.items.find((i) => i.name === n);
+      const inDinner = RECIPE_DATA_REF.sections.Dinner.items.find((i) => i.name === n);
+      return (inLunch || inDinner)?.veggie === true;
+    });
+    return allVeggie || `a non-veggie recipe slipped through: ${names.join(", ")}`;
+  });
+
   click(nav("Daily Log")); await sleep(300);
   const quickCard = () => [...document.querySelectorAll(".pe-card")].find((c) => c.textContent.includes("Quick add"));
 

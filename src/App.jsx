@@ -18,6 +18,7 @@ import { NutritionLabelScanner } from "./NutritionLabelScanner.jsx";
 import { normalizeBarcode } from "./barcode.js";
 import { DeleteAccountCard } from "./DeleteAccount.jsx";
 import { PLAN_DAY_LABELS, mondayOf, weekDatesFrom, computeDayMacros, DayMacroBars, WeekOverviewStrip, MealSlotPicker } from "./WeekPlannerUI.jsx";
+import WeeklyPrepScreen from "./WeeklyPrepScreen.jsx";
 
 
 const GOALS = ["Fat Loss", "Maintenance", "Muscle Gain"];
@@ -386,11 +387,33 @@ function HelpGuideScreen({ onGetStarted, isFirstRun }) {
         every note) as a spreadsheet.</p>
       </Section>
 
-      <Section title="🗓 Plan — setting your week out ahead of time">
+      <Section title="📦 Weekly Prep — a meal-kit-style box, built from your own recipes">
+        <p>Say how many lunches and dinners you want this week, then either <strong>🎲 Surprise me</strong> (it
+        builds the whole box in one go) or <strong>👆 Pick my own</strong> (search and tap the ones you want).
+        It's a quicker, more Gousto/HelloFresh-style way to get a week sorted than picking a recipe for every
+        single day — good for most weeks; use <strong>Plan</strong> (below) instead on a week where you genuinely
+        want day-by-day control.</p>
+        <p>The generator deliberately favours recipes that <strong>share a protein or carb</strong> with something
+        else already in the box — a box of 7 meals typically needs only around 8 core ingredients rather than
+        14, so it's realistically doable as one shopping trip rather than a dozen single-use bits and pieces. The
+        exact number needed for your box is shown once it's built.</p>
+        <p>Not keen on one of the picks? Tap <strong>🔄</strong> on just that recipe to swap it for something else,
+        or <strong>🎲 Shuffle the whole week</strong> to start again completely. <strong>Veggie recipes only</strong>
+        restricts every pick (Surprise me or Pick my own) to veggie recipes.</p>
+        <p>Once you're happy, <strong>"🧺 Add this whole week to my order"</strong> puts every recipe straight into
+        your cart — head to <strong>Shop</strong> (under More) for the combined shopping list. There's no direct
+        checkout into an online supermarket yet — none of the major UK supermarkets currently offer that kind of
+        integration to independent apps — so for now it's a clean list you take to the shop or your own online
+        basket yourself.</p>
+      </Section>
+
+      <Section title="🗓 Plan — setting your week out ahead of time, day by day">
         <p>Pick a Breakfast, Lunch, Dinner, Snack, and Dessert for each day of the week, up to about a month
         ahead. Each day shows the same colour-coded macro bars as the Daily Log, so you can see what a day's
         picks actually add up to before committing to it — genuinely useful for spotting a day that's come out
-        too light or too heavy before you've bought anything.</p>
+        too light or too heavy before you've bought anything. This is the more detailed sibling of Weekly Prep
+        above — reach for this one when you want to choose every meal of every day yourself, rather than lunches
+        and dinners as a batch.</p>
         <p><strong>"Copy last week's plan as a starting point"</strong> pulls your previous week's picks into
         the current one, so you're editing rather than starting from a blank week each time.</p>
         <p>Once you're happy with a week, <strong>"🧺 Add this week's picks to my order"</strong> puts every
@@ -3485,10 +3508,11 @@ function ShoppingListScreen({ cart, profile, checkedItems, toggleChecked, clearC
 const PRIMARY_TABS = [
   { key: "log", label: "Daily Log", icon: "📊" },
   { key: "browse", label: "Recipes", icon: "🍴" },
-  { key: "plan", label: "Plan", icon: "🗓" },
+  { key: "prep", label: "Prep", icon: "📦" },
   { key: "gym", label: "Gym", icon: "🏋" },
 ];
 const MORE_TABS = [
+  { key: "plan", label: "Plan", icon: "🗓" },
   { key: "weight", label: "Weight", icon: "⚖" },
   { key: "order", label: "Order", icon: "🧺" },
   { key: "shopping", label: "Shop", icon: "🛒" },
@@ -3806,6 +3830,7 @@ function AthleteApp({ currentUserId, userEmail, onSignOut, coachId, onProfileRef
         {tab === "browse" && <BrowseScreen profile={profile} cart={cart} updateCart={updateCart} jumpTarget={jumpTarget} onJumpHandled={() => setJumpTarget(null)} />}
         {tab === "weight" && <WeightScreen weightLog={weightLog} onAdd={addWeight} onDelete={deleteWeight} profile={profile} onUseBodyweight={(kg) => setProfile({ ...profile, bodyweight: String(kg) })} />}
         {tab === "plan" && <MyWeekPlanScreen profile={profile} myWeekPlans={myWeekPlans} updateMyWeekPlan={updateMyWeekPlan} updateCart={updateCart} onViewRecipe={viewRecipe} />}
+        {tab === "prep" && <WeeklyPrepScreen profile={profile} updateCart={updateCart} onViewRecipe={viewRecipe} />}
         {tab === "order" && <OrderScreen cart={cart} updateCart={updateCart} profile={profile} onGoShopping={() => setTab("shopping")} orderHistory={orderHistory} onReorder={reorderFromHistory} onViewRecipe={viewRecipe} />}
         {tab === "shopping" && <ShoppingListScreen cart={cart} profile={profile} checkedItems={checkedItems} toggleChecked={toggleChecked} clearChecks={clearChecks} onArchive={archiveOrder} hiddenItems={hiddenItems} onClearTicked={clearTicked} />}
       </div>

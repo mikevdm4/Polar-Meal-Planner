@@ -4,12 +4,12 @@
 import fs from "fs";
 
 const src = (f) => fs.readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8").replace(/^export /gm, "");
-const code = src("data.js") + "\n" + src("calculations.js") + "\n" + src("servings.js") + "\n" + src("logHelpers.js") + "\n" + src("barcode.js") + "\n" + src("labelParser.js") +
+const code = src("data.js") + "\n" + src("calculations.js") + "\n" + src("servings.js") + "\n" + src("logHelpers.js") + "\n" + src("barcode.js") + "\n" + src("labelParser.js") + "\n" + src("weeklyPrep.js") +
   "\nreturn { RECIPE_DATA, FOOD_LIST, computeTargets, mealTarget, scaledMacros, fixedMacros, SERVINGS, servingsFor, gramsFrom, formatAmount," +
-  " normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, parseDate, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange };";
+  " normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, makeRng, pickRecipes, generateWeekBox, rerollOne, uniqueIngredientCount, recipeKeyIngredients, parseDate, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange };";
 const {
   RECIPE_DATA, FOOD_LIST, computeTargets, mealTarget, scaledMacros, fixedMacros, SERVINGS, servingsFor, gramsFrom, formatAmount,
-  normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange,
+  normalizeBarcode, isValidBarcode, explainCameraError, parseNutritionText, toPer100, atwaterCheck, makeRng, pickRecipes, generateWeekBox, rerollOne, uniqueIngredientCount, recipeKeyIngredients, formatDate, shiftDate, entryKey, templateFromEntry, buildRecents, cloneEntries, groupByMeal, upsertWeight, movingAverage, weeklyRate, weightInRange,
 } = new Function(code)();
 
 const DB = Object.fromEntries(FOOD_LIST.map((f) => [f.name, f]));
@@ -267,6 +267,60 @@ section("10. Nutrition-label photo parsing");
   const okConvert = converted.kcal === 418 && converted.protein === 5.5;
   console.log(`   per-serving values convert to per-100g correctly: ${okConvert}`);
   if (!okConvert) fail(`toPer100 conversion wrong: ${JSON.stringify(converted)}`);
+}
+
+// 11. Weekly Prep generation logic, exercised against the REAL recipe database — not a toy fixture — since
+// a bug here (duplicate recipes, a recovery-day meal slipping in, or a box that doesn't actually reduce the
+// shopping list) is exactly the kind of thing that only shows up with real data at real scale.
+section("11. Weekly Prep box generation");
+{
+  const rng1 = makeRng(42);
+  const dinners = pickRecipes(RECIPE_DATA, "Dinner", 5, { rng: rng1 });
+  const noDupes = new Set(dinners).size === dinners.length;
+  const noRecoveryDay = dinners.every((n) => !RECIPE_DATA.sections.Dinner.items.find((i) => i.name === n).recoveryDay);
+  console.log(`   5 picks: got ${dinners.length}, no duplicates: ${noDupes}, no recovery-day meals: ${noRecoveryDay}`);
+  if (dinners.length !== 5 || !noDupes) fail(`pickRecipes gave the wrong count or a duplicate: ${JSON.stringify(dinners)}`);
+  if (!noRecoveryDay) fail("pickRecipes let a Recovery Day meal into an ordinary weekly box");
+
+  const a = pickRecipes(RECIPE_DATA, "Dinner", 5, { rng: makeRng(7) });
+  const b = pickRecipes(RECIPE_DATA, "Dinner", 5, { rng: makeRng(7) });
+  const c = pickRecipes(RECIPE_DATA, "Dinner", 5, { rng: makeRng(8) });
+  const deterministic = JSON.stringify(a) === JSON.stringify(b);
+  const actuallyRandom = JSON.stringify(a) !== JSON.stringify(c);
+  console.log(`   same seed reproducible: ${deterministic} | different seed differs: ${actuallyRandom}`);
+  if (!deterministic) fail("pickRecipes isn't deterministic for a given seed — 'shuffle this one' wouldn't be testable/reviewable");
+  if (!actuallyRandom) fail("pickRecipes gives the same result regardless of seed — it isn't actually randomising");
+
+  // The actual point of the feature: does batching recipes together meaningfully cut the ingredient list,
+  // or is "favours shared ingredients" just a claim in the UI copy with nothing behind it?
+  const box = generateWeekBox(RECIPE_DATA, { Dinner: 4, Lunch: 3 }, { rng: makeRng(99) });
+  const totalMeals = box.Dinner.length + box.Lunch.length;
+  const stats = uniqueIngredientCount(RECIPE_DATA, box);
+  const maxPossible = totalMeals * 2; // worst case: every recipe needs two ingredients nothing else uses
+  const genuinelyReduced = stats.total < maxPossible;
+  console.log(`   ${totalMeals}-meal box needs ${stats.total} unique core ingredients (max possible ${maxPossible}) — meaningfully fewer: ${genuinelyReduced}`);
+  if (totalMeals !== 7) fail(`generateWeekBox gave ${totalMeals} meals, expected 7 (4 dinners + 3 lunches)`);
+  if (!genuinelyReduced) fail(`generateWeekBox isn't actually reducing the ingredient list — got ${stats.total} unique ingredients for ${totalMeals} meals, no better than fully independent recipes`);
+
+  const veggieBox = generateWeekBox(RECIPE_DATA, { Dinner: 3, Lunch: 3 }, { rng: makeRng(5), veggieOnly: true });
+  const allVeggie = [...veggieBox.Dinner, ...veggieBox.Lunch].every((n) =>
+    (RECIPE_DATA.sections.Dinner.items.find((i) => i.name === n) || RECIPE_DATA.sections.Lunch.items.find((i) => i.name === n))?.veggie
+  );
+  console.log(`   veggieOnly box is entirely veggie recipes: ${allVeggie}`);
+  if (!allVeggie) fail("generateWeekBox with veggieOnly:true included a non-veggie recipe");
+
+  const r2 = rerollOne(RECIPE_DATA, "Dinner", dinners, 2, { rng: makeRng(123) });
+  const onlyThatSlotChanged = r2[2] !== dinners[2] && dinners.every((n, i) => i === 2 || r2[i] === n);
+  const stillNoDupes = new Set(r2).size === r2.length;
+  console.log(`   reroll changes only the targeted slot: ${onlyThatSlotChanged} | still no duplicates: ${stillNoDupes}`);
+  if (!onlyThatSlotChanged) fail(`rerollOne changed more than the one targeted slot: before ${JSON.stringify(dinners)}, after ${JSON.stringify(r2)}`);
+  if (!stillNoDupes) fail("rerollOne introduced a duplicate recipe");
+
+  const eligibleLunches = RECIPE_DATA.sections.Lunch.items.filter((i) => !i.recoveryDay).length;
+  const tooMany = pickRecipes(RECIPE_DATA, "Lunch", 999, { rng: makeRng(1) });
+  const capped = tooMany.length === eligibleLunches && new Set(tooMany).size === tooMany.length;
+  console.log(`   asking for more than exist (999) is handled safely: got ${tooMany.length} of ${eligibleLunches} eligible, no duplicates: ${capped}`);
+  if (!capped) fail(`pickRecipes should cap at the number of eligible recipes (${eligibleLunches}) without duplicating, got ${tooMany.length}`);
 }
 
 if (failures.length) {
